@@ -43,17 +43,11 @@ question-hub-document-service/
 
 ### 1. 安装 librocketmq C++ 库（必需）
 
-RocketMQ Python 客户端依赖于 C++ 客户端库。在 macOS ARM64 上安装：
+RocketMQ Python 客户端依赖于 C++ 客户端库。在 macOS M1/M2 上安装：
 
-**快速安装（推荐）**：
-```bash
-cd question-hub-document-service
-./install_rocketmq.sh
-```
+参考下面的安装方法
+https://github.com/apache/rocketmq-client-python/issues/156
 
-**手动安装**：详见 [INSTALL_GUIDE.md](./INSTALL_GUIDE.md)
-
-**验证安装**：详见 [VERIFY_INSTALLATION.md](./VERIFY_INSTALLATION.md)
 
 ### 2. 安装 Python 依赖
 
@@ -219,9 +213,11 @@ JSON格式示例：
 - 检查是否已安装 librocketmq C++ 库
 
 ### rocketmq dynamic library not found
+- **这是 macOS M1/M2 的常见问题**，详见 [RocketMQ 安装指南](./README_ROCKETMQ_INSTALL.md)
 - 需要先安装 librocketmq C++ 库（见安装步骤1）
-- 检查库文件是否在 `/usr/local/lib` 目录
-- 检查环境变量 `DYLD_LIBRARY_PATH` 是否包含库路径
+- 检查库文件是否在 `/usr/local/lib` 目录：`ls -la /usr/local/lib/librocketmq*`
+- 检查环境变量 `DYLD_LIBRARY_PATH` 是否包含库路径：`echo $DYLD_LIBRARY_PATH`
+- **如果使用 M1/M2 芯片**，建议使用 Rosetta 2 运行 x86_64 版本的 Python 和库
 
 ### 无法下载文件
 - 检查文件URL是否可访问
