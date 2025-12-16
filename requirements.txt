@@ -1,0 +1,31 @@
+# Python文档识别服务依赖
+
+# Web框架
+fastapi==0.104.1
+uvicorn[standard]==0.24.0
+
+# 消息队列 - RocketMQ
+# Apache RocketMQ 官方 Python 客户端
+# 参考: https://github.com/apache/rocketmq-client-python
+rocketmq-client-python
+
+# 文档处理
+python-docx==1.1.0
+Pillow>=12.0.0  # Python 3.14 兼容版本
+
+# HTTP请求
+httpx==0.25.1
+requests==2.31.0
+
+# 日志
+loguru==0.7.2
+
+# 工具库
+python-dotenv==1.0.0
+pydantic>=2.5.0,<3.0.0  # 使用兼容Python 3.10的版本
+pydantic-settings>=2.1.0,<3.0.0
+
+# 可选：OCR支持（如果需要）
+# pytesseract==0.3.10
+# opencv-python==4.8.1.78
+
