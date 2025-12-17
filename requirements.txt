@@ -12,6 +12,7 @@ rocketmq-client-python
 # 文档处理
 python-docx==1.1.0
 Pillow>=12.0.0  # Python 3.14 兼容版本
+markitdown[all]>=0.1.4  # 文档转换工具，支持PDF/PPT/Excel/图片等多种格式
 
 # HTTP请求
 httpx==0.25.1

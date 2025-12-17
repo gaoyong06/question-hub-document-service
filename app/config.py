@@ -52,8 +52,40 @@ class Settings(BaseSettings):
     # 题目识别配置
     max_file_size: int = Field(default=50 * 1024 * 1024, alias="MAX_FILE_SIZE")  # 50MB
     supported_extensions: list[str] = Field(
-        default_factory=lambda: [".docx", ".doc"],
+        default_factory=lambda: [
+            ".docx", ".doc",  # Word
+            ".pdf",  # PDF
+            ".ppt", ".pptx",  # PowerPoint
+            ".xls", ".xlsx",  # Excel
+            ".jpg", ".jpeg", ".png", ".gif", ".bmp",  # 图片
+            ".txt", ".html", ".csv", ".json", ".xml",  # 文本
+            ".epub"  # EPUB
+        ],
         alias="SUPPORTED_EXTENSIONS"
+    )
+    
+    # Asset Service配置
+    asset_service_url: str = Field(
+        default="http://localhost:8104",
+        alias="ASSET_SERVICE_URL"
+    )
+    asset_service_app_id: str = Field(
+        default="",
+        alias="ASSET_SERVICE_APP_ID"
+    )
+    
+    # OCR配置（可选）
+    enable_ocr: bool = Field(
+        default=True,
+        alias="ENABLE_OCR"
+    )
+    azure_docintel_endpoint: Optional[str] = Field(
+        default=None,
+        alias="AZURE_DOCINTEL_ENDPOINT"
+    )
+    azure_docintel_key: Optional[str] = Field(
+        default=None,
+        alias="AZURE_DOCINTEL_KEY"
     )
     
     class Config:

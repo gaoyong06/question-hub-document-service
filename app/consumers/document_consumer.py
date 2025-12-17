@@ -3,6 +3,7 @@ RocketMQ消息消费者
 监听文档转换任务并处理
 """
 import json
+import os
 import traceback
 import time
 from typing import Optional
@@ -13,6 +14,9 @@ from rocketmq.client import Producer, PushConsumer, Message, ConsumeStatus
 from app.config import settings
 from app.models import DocumentConvertMessage, DocumentConvertResultMessage
 from app.services.document_parser import DocumentParser
+from app.services.markdown_converter import MarkdownConverter, MARKITDOWN_AVAILABLE
+from app.services.markdown_parser import MarkdownParser
+from app.services.image_processor import ImageProcessor
 
 
 class DocumentConsumer:
@@ -22,6 +26,19 @@ class DocumentConsumer:
         self.consumer: Optional[PushConsumer] = None
         self.producer: Optional[Producer] = None
         self.parser = DocumentParser()
+        self.markdown_converter = (
+            MarkdownConverter(
+                enable_ocr=settings.enable_ocr,
+                azure_docintel_endpoint=settings.azure_docintel_endpoint,
+                azure_docintel_key=settings.azure_docintel_key
+            ) if MARKITDOWN_AVAILABLE else None
+        )
+        self.markdown_parser = MarkdownParser()
+        self.image_processor = ImageProcessor(
+            asset_service_url=settings.asset_service_url,
+            app_id=settings.asset_service_app_id,
+            user_id=""  # 可以从消息中获取
+        )
     
     def connect(self):
         """连接到RocketMQ"""
@@ -132,8 +149,91 @@ class DocumentConsumer:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
             
-            # 解析文档
-            questions = self.parser.parse_document(file_path)
+            # 判断文件格式
+            file_ext = os.path.splitext(file_path)[1].lower()
+            
+            # Word文档：直接解析
+            if file_ext in ['.doc', '.docx']:
+                questions = self.parser.parse_document(file_path)
+                return questions
+            
+            # 其他格式：使用MarkItDown转换为Markdown，然后解析
+            if not self.markdown_converter:
+                raise RuntimeError("MarkItDown is not available. Cannot process non-Word formats.")
+            
+            if not self.markdown_converter.is_supported_format(file_path):
+                raise ValueError(f"Unsupported file format: {file_ext}")
+            
+            # 转换为Markdown
+            markdown_content, metadata = self.markdown_converter.convert_to_markdown(file_path)
+            
+            # 处理图片：提取、上传、替换路径
+            import asyncio
+            try:
+                # 尝试获取现有的事件循环
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        # 如果事件循环正在运行，创建新的事件循环在另一个线程中运行
+                        import concurrent.futures
+                        import threading
+                        result_container = {}
+                        exception_container = {}
+                        
+                        def run_in_thread():
+                            try:
+                                new_loop = asyncio.new_event_loop()
+                                asyncio.set_event_loop(new_loop)
+                                result = new_loop.run_until_complete(
+                                    self.image_processor.process_images_in_markdown(
+                                        markdown_content,
+                                        document_base_path=os.path.dirname(file_path),
+                                        business_type="question_image"
+                                    )
+                                )
+                                result_container['result'] = result
+                                new_loop.close()
+                            except Exception as e:
+                                exception_container['exception'] = e
+                        
+                        thread = threading.Thread(target=run_in_thread)
+                        thread.start()
+                        thread.join()
+                        
+                        if 'exception' in exception_container:
+                            raise exception_container['exception']
+                        processed_markdown, image_urls = result_container['result']
+                    else:
+                        processed_markdown, image_urls = loop.run_until_complete(
+                            self.image_processor.process_images_in_markdown(
+                                markdown_content,
+                                document_base_path=os.path.dirname(file_path),
+                                business_type="question_image"
+                            )
+                        )
+                except RuntimeError:
+                    # 没有事件循环，创建新的
+                    processed_markdown, image_urls = asyncio.run(
+                        self.image_processor.process_images_in_markdown(
+                            markdown_content,
+                            document_base_path=os.path.dirname(file_path),
+                            business_type="question_image"
+                        )
+                    )
+            except Exception as e:
+                logger.warning(f"Failed to process images, continuing without image processing: {e}")
+                # 如果图片处理失败，继续使用原始Markdown
+                processed_markdown = markdown_content
+                image_urls = []
+            
+            # 从Markdown解析题目
+            questions = self.markdown_parser.parse_markdown_to_questions(processed_markdown)
+            
+            # 将图片URL添加到题目中
+            for question in questions:
+                if not question.images:
+                    question.images = []
+                question.images.extend(image_urls)
             
             return questions
             
