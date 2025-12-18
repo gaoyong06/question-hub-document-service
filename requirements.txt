@@ -11,19 +11,20 @@ rocketmq-client-python
 
 # 文档处理
 python-docx==1.1.0
-Pillow>=12.0.0  # Python 3.14 兼容版本
+Pillow>=10.0.0,<13.0.0  # 兼容 Python 3.14 的版本范围
 markitdown[all]>=0.1.4  # 文档转换工具，支持PDF/PPT/Excel/图片等多种格式
 
 # HTTP请求
 httpx==0.25.1
 requests==2.31.0
+urllib3>=1.21.1,<3.0.0  # 明确指定 urllib3 版本，避免依赖冲突
 
 # 日志
 loguru==0.7.2
 
 # 工具库
 python-dotenv==1.0.0
-pydantic>=2.5.0,<3.0.0  # 使用兼容Python 3.10的版本
+pydantic>=2.5.0,<3.0.0
 pydantic-settings>=2.1.0,<3.0.0
 
 # 可选：OCR支持（如果需要）

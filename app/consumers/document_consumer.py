@@ -49,13 +49,20 @@ class DocumentConsumer:
             logger.info(f"Consume Tag: {settings.rocketmq_consume_tag}")
             
             # 创建消费者
+            logger.info("Creating PushConsumer...")
             self.consumer = PushConsumer(settings.rocketmq_consumer_group)
+            logger.info(f"PushConsumer created: {self.consumer}")
+            
+            logger.info(f"Setting NameServer address: {settings.rocketmq_name_server}")
             self.consumer.set_name_server_address(settings.rocketmq_name_server)
+            logger.info("NameServer address set successfully")
             
             # 创建生产者（用于发送结果）
+            logger.info("Creating Producer...")
             self.producer = Producer(settings.rocketmq_producer_group)
             self.producer.set_name_server_address(settings.rocketmq_name_server)
             self.producer.start()
+            logger.info("Producer started successfully")
             
             logger.info("Connected to RocketMQ successfully")
             
@@ -72,20 +79,41 @@ class DocumentConsumer:
         logger.info("Starting to consume messages...")
         
         # 订阅消息，使用回调函数处理
+        # Python RocketMQ 客户端支持在 subscribe 时指定 tag
+        # 格式：subscribe(topic, tag, callback)
+        # 如果不指定 tag，则接收所有消息
+        logger.info(f"Subscribing to topic={settings.rocketmq_topic}, tag={settings.rocketmq_consume_tag}")
+        
+        # Python RocketMQ 客户端的 subscribe 方法只接受 (topic, callback) 参数
+        # tag 过滤需要在 handler 中手动处理
+        # 参考：https://github.com/apache/rocketmq-client-python
+        logger.info(f"Subscribing to topic={settings.rocketmq_topic} (tag filtering will be done in handler)")
         self.consumer.subscribe(
             settings.rocketmq_topic,
             self._handle_message
         )
+        logger.info(f"Successfully subscribed to topic={settings.rocketmq_topic} (will filter tag '{settings.rocketmq_consume_tag}' in handler)")
         
-        # 启动消费者
+        # 启动消费者（必须在 subscribe 之后）
+        logger.info("Starting consumer...")
         self.consumer.start()
+        logger.info("Consumer started successfully")
         
         logger.info("Waiting for messages. To exit press CTRL+C")
+        
+        # 添加心跳日志，确认消费者正常运行
+        last_heartbeat = time.time()
+        heartbeat_interval = 30  # 每30秒输出一次心跳日志
         
         try:
             # 保持运行
             while True:
                 time.sleep(1)
+                # 每30秒输出一次心跳日志
+                current_time = time.time()
+                if current_time - last_heartbeat >= heartbeat_interval:
+                    logger.debug(f"Consumer is alive, waiting for messages... (elapsed: {int(current_time - last_heartbeat)}s)")
+                    last_heartbeat = current_time
         except KeyboardInterrupt:
             logger.info("Stopping consumer...")
             self.close()
@@ -94,19 +122,52 @@ class DocumentConsumer:
         """处理接收到的消息"""
         task_id = None
         try:
+            # 记录收到的所有消息（用于调试）
+            logger.info("=" * 60)
+            logger.info("MESSAGE RECEIVED - Starting to process")
+            
+            # 尝试多种方式获取 tag
+            msg_tag = None
+            if hasattr(msg, 'get_tags'):
+                msg_tag = msg.get_tags()
+            elif hasattr(msg, 'tags'):
+                msg_tag = msg.tags
+            elif hasattr(msg, 'get_property'):
+                msg_tag = msg.get_property('TAGS')
+            
+            # 如果 tag 是字节串，转换为字符串
+            if isinstance(msg_tag, bytes):
+                msg_tag = msg_tag.decode('utf-8')
+            
+            # 获取消息的所有属性（用于调试）
+            msg_attrs = {}
+            if hasattr(msg, '__dict__'):
+                msg_attrs = {k: str(v)[:100] for k, v in msg.__dict__.items() if not k.startswith('_')}
+            
+            logger.info(f"Message details: topic={getattr(msg, 'topic', 'unknown')}, tag={msg_tag} (type: {type(msg_tag).__name__}), msgId={getattr(msg, 'msg_id', getattr(msg, 'msgId', 'unknown'))}")
+            logger.debug(f"Message attributes: {msg_attrs}")
+            
+            # 检查 Tag 是否匹配（只处理 document.convert 消息）
+            # 注意：Python RocketMQ 客户端可能不支持 tag 过滤，所以在这里严格过滤
+            if not msg_tag:
+                logger.warning(f"Message has no tag, skipping. Expected tag: {settings.rocketmq_consume_tag}")
+                return ConsumeStatus.CONSUME_SUCCESS
+            
+            if msg_tag != settings.rocketmq_consume_tag:
+                logger.debug(f"Message tag '{msg_tag}' does not match consume tag '{settings.rocketmq_consume_tag}', skipping")
+                return ConsumeStatus.CONSUME_SUCCESS
+            
+            logger.info(f"Message tag matched: '{msg_tag}' == '{settings.rocketmq_consume_tag}', processing...")
+            
             # 解析消息
             body = msg.body.decode('utf-8') if isinstance(msg.body, bytes) else msg.body
+            logger.debug(f"Message body: {body[:200]}...")  # 只记录前200个字符
+            
             message_data = json.loads(body)
             message = DocumentConvertMessage(**message_data)
             task_id = message.task_id
             
-            logger.info(f"Received conversion task: task_id={task_id}, file_url={message.file_url}")
-            
-            # 检查 Tag 是否匹配
-            msg_tag = msg.get_tags() if hasattr(msg, 'get_tags') else None
-            if msg_tag and msg_tag != settings.rocketmq_consume_tag:
-                logger.debug(f"Message tag {msg_tag} does not match consume tag {settings.rocketmq_consume_tag}, skipping")
-                return ConsumeStatus.CONSUME_SUCCESS
+            logger.info(f"Processing conversion task: task_id={task_id}, file_url={message.file_url}")
             
             # 处理文档转换
             questions = self._process_document(message)

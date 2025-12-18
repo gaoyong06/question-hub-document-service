@@ -48,6 +48,11 @@ class Settings(BaseSettings):
     # 日志配置
     log_level: str = Field(default="INFO", alias="LOG_LEVEL")
     log_format: str = Field(default="json", alias="LOG_FORMAT")  # json or text
+    log_file_path: str = Field(
+        default="logs/question-hub-document-service.log",
+        alias="LOG_FILE_PATH"
+    )
+    log_to_file: bool = Field(default=True, alias="LOG_TO_FILE")  # 是否同时输出到文件
     
     # 题目识别配置
     max_file_size: int = Field(default=50 * 1024 * 1024, alias="MAX_FILE_SIZE")  # 50MB

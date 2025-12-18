@@ -26,16 +26,26 @@ class DocumentParser:
         """
         下载文件到临时目录
         
+        支持多种协议：
+        - http://, https://: 通过HTTP下载
+        - file://: 直接访问本地文件系统
+        - 相对路径或绝对路径: 作为本地文件路径处理
+        
         Args:
-            file_url: 文件URL
+            file_url: 文件URL或路径
             
         Returns:
             本地文件路径
         """
         import httpx
+        from urllib.parse import urlparse
+        
+        # 解析URL
+        parsed = urlparse(file_url)
+        scheme = parsed.scheme.lower()
         
         # 从URL提取文件名
-        file_name = os.path.basename(file_url.split("?")[0])
+        file_name = os.path.basename(parsed.path or file_url.split("?")[0])
         if not file_name:
             file_name = "document.docx"
         
@@ -45,22 +55,86 @@ class DocumentParser:
         
         local_path = self.temp_dir / file_name
         
-        logger.info(f"Downloading file from {file_url} to {local_path}")
+        logger.info(f"Downloading file from {file_url} to {local_path} (scheme: {scheme})")
         
-        # 下载文件
-        with httpx.Client(timeout=settings.download_timeout) as client:
-            response = client.get(file_url)
-            response.raise_for_status()
+        # 根据协议类型处理
+        if scheme in ('http', 'https'):
+            # HTTP/HTTPS: 通过HTTP下载
+            with httpx.Client(timeout=settings.download_timeout) as client:
+                response = client.get(file_url)
+                response.raise_for_status()
+                
+                # 检查文件大小
+                content_length = response.headers.get("content-length")
+                if content_length and int(content_length) > settings.max_file_size:
+                    raise ValueError(f"File size {content_length} exceeds maximum {settings.max_file_size}")
+                
+                # 保存文件
+                with open(local_path, "wb") as f:
+                    for chunk in response.iter_bytes(chunk_size=settings.download_chunk_size):
+                        f.write(chunk)
+        
+        elif scheme == 'file':
+            # file:// 协议: 直接访问本地文件
+            # file:///path/to/file 或 file://localhost/path/to/file
+            file_path = parsed.path
+            # 处理 Windows 路径 (file:///C:/path/to/file)
+            if os.name == 'nt' and len(file_path) > 2 and file_path[0] == '/' and file_path[2] == ':':
+                file_path = file_path[1:]  # 移除开头的 /
+            
+            if not os.path.isabs(file_path):
+                raise ValueError(f"file:// URL must be an absolute path: {file_path}")
+            
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"File not found: {file_path}")
             
             # 检查文件大小
-            content_length = response.headers.get("content-length")
-            if content_length and int(content_length) > settings.max_file_size:
-                raise ValueError(f"File size {content_length} exceeds maximum {settings.max_file_size}")
+            file_size = os.path.getsize(file_path)
+            if file_size > settings.max_file_size:
+                raise ValueError(f"File size {file_size} exceeds maximum {settings.max_file_size}")
             
-            # 保存文件
-            with open(local_path, "wb") as f:
-                for chunk in response.iter_bytes(chunk_size=settings.download_chunk_size):
-                    f.write(chunk)
+            # 复制文件到临时目录
+            import shutil
+            shutil.copy2(file_path, local_path)
+            logger.info(f"Copied file from {file_path} to {local_path}")
+        
+        else:
+            # 无协议或未知协议: 作为本地文件路径处理
+            # 可能是相对路径或绝对路径
+            file_path = file_url
+            
+            # 如果是相对路径，尝试从常见位置查找
+            if not os.path.isabs(file_path):
+                # 尝试从 asset-service 的默认存储路径查找
+                possible_paths = [
+                    file_path,  # 原始路径
+                    os.path.join("./uploads", file_path),  # 相对 uploads 目录
+                    os.path.join("/uploads", file_path),  # 绝对 uploads 目录
+                ]
+                
+                found = False
+                for path in possible_paths:
+                    abs_path = os.path.abspath(path)
+                    if os.path.exists(abs_path):
+                        file_path = abs_path
+                        found = True
+                        break
+                
+                if not found:
+                    raise FileNotFoundError(f"File not found: {file_url} (tried: {possible_paths})")
+            else:
+                if not os.path.exists(file_path):
+                    raise FileNotFoundError(f"File not found: {file_path}")
+            
+            # 检查文件大小
+            file_size = os.path.getsize(file_path)
+            if file_size > settings.max_file_size:
+                raise ValueError(f"File size {file_size} exceeds maximum {settings.max_file_size}")
+            
+            # 复制文件到临时目录
+            import shutil
+            shutil.copy2(file_path, local_path)
+            logger.info(f"Copied file from {file_path} to {local_path}")
         
         logger.info(f"File downloaded successfully: {local_path}")
         return str(local_path)
