@@ -154,7 +154,7 @@ class DocumentConsumer:
                 return ConsumeStatus.CONSUME_SUCCESS
             
             if msg_tag != settings.rocketmq_consume_tag:
-                logger.debug(f"Message tag '{msg_tag}' does not match consume tag '{settings.rocketmq_consume_tag}', skipping")
+                logger.info(f"Message tag '{msg_tag}' does not match consume tag '{settings.rocketmq_consume_tag}', skipping")
                 return ConsumeStatus.CONSUME_SUCCESS
             
             logger.info(f"Message tag matched: '{msg_tag}' == '{settings.rocketmq_consume_tag}', processing...")
