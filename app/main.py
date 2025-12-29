@@ -4,10 +4,103 @@
 """
 import signal
 import sys
+from pathlib import Path
 from loguru import logger
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+import uvicorn
+import threading
 
 from app.config import settings
 from app.consumers.document_consumer import DocumentConsumer
+
+
+# 创建FastAPI应用
+app = FastAPI(
+    title=settings.service_name,
+    version=settings.service_version,
+    description="Word文档识别服务 - 从Word文档中提取题目信息"
+)
+
+# 全局消费者实例（用于健康检查）
+_consumer_instance = None
+
+
+@app.get("/")
+async def root():
+    """根路径 - 服务信息"""
+    return {
+        "service": settings.service_name,
+        "version": settings.service_version,
+        "status": "running"
+    }
+
+
+@app.get("/health")
+async def health_check():
+    """健康检查端点"""
+    health_status = {
+        "status": "healthy",
+        "service": settings.service_name,
+        "version": settings.service_version,
+        "checks": {}
+    }
+    
+    # 检查临时目录
+    try:
+        temp_dir = Path(settings.temp_file_dir)
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        # 尝试写入测试文件
+        test_file = temp_dir / ".health_check"
+        test_file.write_text("ok")
+        test_file.unlink()
+        health_status["checks"]["temp_directory"] = {
+            "status": "healthy",
+            "path": str(temp_dir)
+        }
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["temp_directory"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+    
+    # 检查RocketMQ连接
+    try:
+        if _consumer_instance and _consumer_instance.consumer:
+            health_status["checks"]["rocketmq"] = {
+                "status": "healthy",
+                "name_server": settings.rocketmq_name_server,
+                "topic": settings.rocketmq_topic,
+                "consumer_group": settings.rocketmq_consumer_group
+            }
+        else:
+            health_status["status"] = "unhealthy"
+            health_status["checks"]["rocketmq"] = {
+                "status": "unhealthy",
+                "error": "Consumer not initialized"
+            }
+    except Exception as e:
+        health_status["status"] = "unhealthy"
+        health_status["checks"]["rocketmq"] = {
+            "status": "unhealthy",
+            "error": str(e)
+        }
+    
+    # 返回适当的HTTP状态码
+    status_code = 200 if health_status["status"] == "healthy" else 503
+    return JSONResponse(content=health_status, status_code=status_code)
+
+
+@app.get("/ready")
+async def readiness_check():
+    """就绪检查端点（Kubernetes readiness probe）"""
+    if _consumer_instance and _consumer_instance.consumer:
+        return {"status": "ready"}
+    return JSONResponse(
+        content={"status": "not ready", "reason": "Consumer not initialized"},
+        status_code=503
+    )
 
 
 def setup_logging():
@@ -60,6 +153,8 @@ def setup_logging():
 
 def main():
     """主函数"""
+    global _consumer_instance
+    
     setup_logging()
     
     logger.info(f"Starting {settings.service_name} v{settings.service_version}")
@@ -69,6 +164,7 @@ def main():
     logger.info(f"Consume Tag: {settings.rocketmq_consume_tag}")
     
     consumer = DocumentConsumer()
+    _consumer_instance = consumer
     
     # 注册信号处理
     def signal_handler(sig, frame):
@@ -83,7 +179,21 @@ def main():
         # 连接RocketMQ
         consumer.connect()
         
-        # 开始消费消息
+        # 在单独的线程中启动FastAPI服务器
+        def run_fastapi():
+            uvicorn.run(
+                app,
+                host="0.0.0.0",
+                port=8121,
+                log_level="info"
+            )
+        
+        fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
+        fastapi_thread.start()
+        logger.info("FastAPI server started on http://0.0.0.0:8121")
+        logger.info("Health check: http://0.0.0.0:8121/health")
+        
+        # 开始消费消息（阻塞主线程）
         consumer.start_consuming()
         
     except Exception as e:
