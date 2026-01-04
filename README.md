@@ -1,12 +1,13 @@
 # Question Hub Document Service
 
-Word文档识别服务 - 从Word文档中提取题目信息
+文档识别服务 - 从多种文档格式中提取题目信息
 
 ## 功能特性
 
 - ✅ 监听RocketMQ消息队列，接收文档转换任务
-- ✅ 下载Word文档（支持.docx和.doc格式）
-- ✅ 解析Word文档，提取文本内容
+- ✅ 支持多种文档格式：Word (.doc, .docx)、PDF (.pdf)、PowerPoint (.ppt, .pptx)、Excel (.xls, .xlsx)、图片 (.jpg, .jpeg, .png, .gif, .bmp)、文本 (.txt, .html, .csv, .json, .xml)、EPUB (.epub)
+- ✅ 自动转换文档为Markdown格式（非Word格式）
+- ✅ 解析文档内容，提取文本和图片
 - ✅ 识别题目类型（单选题、多选题、填空题、判断题、解答题）
 - ✅ 提取题目内容、选项、答案、解析
 - ✅ 发送转换结果到RocketMQ队列
@@ -16,7 +17,8 @@ Word文档识别服务 - 从Word文档中提取题目信息
 - **Python 3.9+**
 - **FastAPI** - Web框架（可选，用于健康检查）
 - **rocketmq-client-python** - RocketMQ Python客户端（需要先安装 librocketmq C++ 库）
-- **python-docx** - Word文档解析
+- **python-docx** - Word文档解析（.doc, .docx）
+- **markitdown** - 多格式文档转换（PDF、PowerPoint、Excel、图片、文本等）
 - **loguru** - 日志管理
 - **pydantic** - 数据验证
 
@@ -225,7 +227,7 @@ JSON格式示例：
 - 检查文件大小是否超过限制
 
 ### 无法识别题目
-- 检查Word文档格式是否正确
+- 检查文档格式是否支持（支持 Word、PDF、PowerPoint、Excel、图片、文本、EPUB 等）
 - 检查题目格式是否符合识别规则
 - 查看日志了解详细错误信息
 

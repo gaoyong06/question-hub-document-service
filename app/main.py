@@ -19,7 +19,7 @@ from app.consumers.document_consumer import DocumentConsumer
 app = FastAPI(
     title=settings.service_name,
     version=settings.service_version,
-    description="Word文档识别服务 - 从Word文档中提取题目信息"
+    description="文档识别服务 - 支持多种文档格式（Word、PDF、PowerPoint、Excel、图片、文本、EPUB等），自动提取题目信息"
 )
 
 # 全局消费者实例（用于健康检查）

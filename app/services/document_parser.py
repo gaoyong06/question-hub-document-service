@@ -1,6 +1,7 @@
 """
-Word文档解析服务
-使用python-docx解析Word文档
+文档解析服务
+使用python-docx解析Word文档（.doc, .docx）
+其他格式通过MarkItDown转换为Markdown后解析
 """
 import os
 import re
@@ -16,7 +17,7 @@ from app.config import settings
 
 
 class DocumentParser:
-    """Word文档解析器"""
+    """文档解析器（支持Word格式，其他格式通过MarkItDown转换）"""
     
     def __init__(self):
         self.temp_dir = Path(settings.temp_file_dir)
