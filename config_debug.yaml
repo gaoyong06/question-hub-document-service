@@ -1,0 +1,67 @@
+# 测试环境配置
+# config_debug.yaml
+# 注意：此项目使用环境变量配置，此文件仅作为配置参考
+# 实际配置请使用 .env.debug 文件或环境变量
+
+# 服务配置
+service:
+  name: question-hub-document-service
+  version: 1.0.0
+
+# RocketMQ配置
+rocketmq:
+  name_server: localhost:9876
+  topic: question_hub
+  consumer_group: question_hub_document_consumer
+  producer_group: question_hub_document_producer
+  consume_tag: document.convert
+  publish_tag: document.convert.result
+
+# 文件下载配置
+download:
+  timeout: 300  # 5分钟
+  chunk_size: 8192
+  temp_file_dir: /tmp/question-hub-documents
+
+# 日志配置
+log:
+  level: INFO
+  format: json
+  file_path: logs/question-hub-document-service.log
+  to_file: true
+
+# 题目识别配置
+document:
+  max_file_size: 52428800  # 50MB
+  supported_extensions:
+    - .docx
+    - .doc
+    - .pdf
+    - .ppt
+    - .pptx
+    - .xls
+    - .xlsx
+    - .jpg
+    - .jpeg
+    - .png
+    - .gif
+    - .bmp
+    - .txt
+    - .html
+    - .csv
+    - .json
+    - .xml
+    - .epub
+
+# Asset Service配置
+asset_service:
+  url: http://localhost:8104
+  app_id: ""
+
+# OCR配置（可选）
+ocr:
+  enabled: true
+  azure_docintel_endpoint: ""
+  azure_docintel_key: ""
+
+
