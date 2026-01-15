@@ -78,7 +78,7 @@ cp .env.example .env
 python -m app.main
 
 # 或使用uvicorn（如果添加了HTTP接口）
-uvicorn app.main:app --host 0.0.0.0 --port 8121
+uvicorn app.main:app --host 0.0.0.0 --port 8122
 ```
 
 ## 配置说明

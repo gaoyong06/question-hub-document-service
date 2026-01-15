@@ -2,9 +2,56 @@
 配置管理
 """
 import os
+import sys
 from typing import Optional
 from pydantic_settings import BaseSettings
 from pydantic import Field
+import yaml
+
+
+def load_yaml_config():
+    """加载YAML配置文件到环境变量"""
+    config_path = os.getenv("CONFIG_PATH")
+    
+    # 尝试从命令行参数获取
+    if "--config" in sys.argv:
+        try:
+            idx = sys.argv.index("--config")
+            if idx + 1 < len(sys.argv):
+                config_path = sys.argv[idx + 1]
+        except ValueError:
+            pass
+            
+    if not config_path or not os.path.exists(config_path):
+        return
+
+    print(f"Loading config from {config_path}")
+    try:
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+            
+        def flatten_dict(d, parent_key='', sep='_'):
+            items = []
+            for k, v in d.items():
+                new_key = f"{parent_key}{sep}{k}" if parent_key else k
+                if isinstance(v, dict):
+                    items.extend(flatten_dict(v, new_key, sep=sep).items())
+                else:
+                    items.append((new_key.upper(), str(v)))
+            return dict(items)
+            
+        if config:
+            flat_config = flatten_dict(config)
+            for k, v in flat_config.items():
+                # 只有当环境变量未设置时才设置
+                if k not in os.environ:
+                    os.environ[k] = v
+                
+    except Exception as e:
+        print(f"Error loading config file: {e}")
+
+# 在Settings类定义之前加载配置
+load_yaml_config()
 
 
 class Settings(BaseSettings):

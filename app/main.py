@@ -38,58 +38,12 @@ async def root():
 
 @app.get("/health")
 async def health_check():
-    """健康检查端点"""
-    health_status = {
-        "status": "healthy",
+    """健康检查端点 - 统一使用 go-pkg/health 格式"""
+    return {
+        "status": "UP",
         "service": settings.service_name,
-        "version": settings.service_version,
-        "checks": {}
+        "timestamp": int(time.time())
     }
-    
-    # 检查临时目录
-    try:
-        temp_dir = Path(settings.temp_file_dir)
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        # 尝试写入测试文件
-        test_file = temp_dir / ".health_check"
-        test_file.write_text("ok")
-        test_file.unlink()
-        health_status["checks"]["temp_directory"] = {
-            "status": "healthy",
-            "path": str(temp_dir)
-        }
-    except Exception as e:
-        health_status["status"] = "unhealthy"
-        health_status["checks"]["temp_directory"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-    
-    # 检查RocketMQ连接
-    try:
-        if _consumer_instance and _consumer_instance.consumer:
-            health_status["checks"]["rocketmq"] = {
-                "status": "healthy",
-                "name_server": settings.rocketmq_name_server,
-                "topic": settings.rocketmq_topic,
-                "consumer_group": settings.rocketmq_consumer_group
-            }
-        else:
-            health_status["status"] = "unhealthy"
-            health_status["checks"]["rocketmq"] = {
-                "status": "unhealthy",
-                "error": "Consumer not initialized"
-            }
-    except Exception as e:
-        health_status["status"] = "unhealthy"
-        health_status["checks"]["rocketmq"] = {
-            "status": "unhealthy",
-            "error": str(e)
-        }
-    
-    # 返回适当的HTTP状态码
-    status_code = 200 if health_status["status"] == "healthy" else 503
-    return JSONResponse(content=health_status, status_code=status_code)
 
 
 @app.get("/ready")
@@ -184,14 +138,14 @@ def main():
             uvicorn.run(
                 app,
                 host="0.0.0.0",
-                port=8121,
+                port=8122,
                 log_level="info"
             )
         
         fastapi_thread = threading.Thread(target=run_fastapi, daemon=True)
         fastapi_thread.start()
-        logger.info("FastAPI server started on http://0.0.0.0:8121")
-        logger.info("Health check: http://0.0.0.0:8121/health")
+        logger.info("FastAPI server started on http://0.0.0.0:8122")
+        logger.info("Health check: http://0.0.0.0:8122/health")
         
         # 开始消费消息（阻塞主线程）
         consumer.start_consuming()
