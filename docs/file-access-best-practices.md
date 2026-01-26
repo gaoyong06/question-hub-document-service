@@ -37,7 +37,7 @@ document-service → HTTP URL → 下载文件
 
 **实现**：
 - `asset-service` 的 `GetURL` 方法统一返回 HTTP URL
-- 本地存储：`http://asset-service:8104/api/v1/files/{fileId}/content`
+- 本地存储：`http://asset-service:8104/asset/v1/files/{fileId}/content`
 - 对象存储：返回预签名 URL
 
 #### 方案二：支持多种协议（当前实现）

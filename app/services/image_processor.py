@@ -129,7 +129,7 @@ class ImageProcessor:
                     headers['X-User-ID'] = self.user_id
                 
                 response = await client.post(
-                    f"{self.asset_service_url}/api/v1/files/upload",
+                    f"{self.asset_service_url}/asset/v1/files",
                     files=files,
                     data=data,
                     headers=headers
@@ -145,7 +145,7 @@ class ImageProcessor:
                     if file_id:
                         # 返回文件ID，实际URL可以通过getFileURL获取
                         # 或者直接返回fileId，让前端调用getFileURL
-                        file_url = f"{self.asset_service_url}/api/v1/files/{file_id}/url"
+                        file_url = f"{self.asset_service_url}/asset/v1/files/{file_id}/url"
                         logger.info(f"Image uploaded successfully: file_id={file_id}")
                         return file_url
                     else:
