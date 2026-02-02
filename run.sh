@@ -202,7 +202,7 @@ if [ "$VERBOSE" = "1" ]; then
     
     # 显示配置信息
     log_step "服务配置信息"
-    log_info "Topic: question_hub"
+    log_info "Topic: question_hub_events"
     log_info "Consumer Group: question_hub_document_consumer"
     log_info "Consume Tag: document.convert"
     log_info "Publish Tag: document.convert.result"

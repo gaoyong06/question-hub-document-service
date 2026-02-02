@@ -88,7 +88,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `ROCKETMQ_NAME_SERVER` | RocketMQ NameServer 地址 | `localhost:9876` |
-| `ROCKETMQ_TOPIC` | Topic名称 | `question_hub` |
+| `ROCKETMQ_TOPIC` | Topic名称 | `question_hub_events` |
 | `ROCKETMQ_CONSUMER_GROUP` | 消费者组名 | `question_hub_document_consumer` |
 | `ROCKETMQ_PRODUCER_GROUP` | 生产者组名 | `question_hub_document_producer` |
 | `ROCKETMQ_CONSUME_TAG` | 消费Tag（接收） | `document.convert` |

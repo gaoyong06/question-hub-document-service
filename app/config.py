@@ -67,7 +67,7 @@ class Settings(BaseSettings):
         alias="ROCKETMQ_NAME_SERVER"
     )
     rocketmq_topic: str = Field(
-        default="question_hub",
+        default="question_hub_events",
         alias="ROCKETMQ_TOPIC"
     )
     rocketmq_consumer_group: str = Field(

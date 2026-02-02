@@ -10,8 +10,8 @@ service:
 
 # RocketMQ配置
 rocketmq:
-  name_server: 127.0.0.1:9876
-  topic: question_hub
+  name_server: rocketmq:9876
+  topic: question_hub_events
   consumer_group: question_hub_document_consumer
   producer_group: question_hub_document_producer
   consume_tag: document.convert
