@@ -29,6 +29,9 @@ class QuestionResult(BaseModel):
     grade: int = 1  # 1-9
     subject: str = ""  # 数学、语文、英语等
     tags: Optional[List[str]] = None
+    # 试卷层级：所属大题标题与顺序，供下游按 section 分组建卷
+    section_title: Optional[str] = None
+    section_order: Optional[int] = None
 
 
 class DocumentConvertResultMessage(BaseModel):

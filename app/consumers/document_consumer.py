@@ -203,6 +203,38 @@ class DocumentConsumer:
             # 返回失败，RocketMQ会自动重试
             return ConsumeStatus.RECONSUME_LATER
     
+    async def _upload_docx_images_and_replace_placeholders(
+        self,
+        questions: list,
+        image_paths: list,
+        business_type: str = "question_image",
+    ) -> list:
+        """上传 docx 中提取的图片，将题目 content 中的 {{IMAGE_N}} 替换为 Markdown 图片并写入 question.images。"""
+        import re
+        replacements = {}  # placeholder -> url
+        for i, path in enumerate(image_paths):
+            placeholder = "{{IMAGE_%d}}" % i
+            try:
+                url = await self.image_processor.upload_image_to_asset_service(path, business_type)
+                replacements[placeholder] = url
+            except Exception as e:
+                logger.warning("Upload image %s failed: %s", path, e)
+        markdown_by_ph = {ph: "![image](%s)" % url for ph, url in replacements.items()}
+        for q in questions:
+            # 题干、参考答案、解析中均可能含图片占位符，统一替换
+            for ph, url in replacements.items():
+                markdown_img = markdown_by_ph[ph]
+                if q.content and ph in q.content:
+                    q.content = q.content.replace(ph, markdown_img)
+                    if q.images is None:
+                        q.images = []
+                    q.images.append(url)
+                if q.answer and ph in q.answer:
+                    q.answer = q.answer.replace(ph, markdown_img)
+                if q.explanation and ph in q.explanation:
+                    q.explanation = q.explanation.replace(ph, markdown_img)
+        return questions
+
     def _process_document(self, message: DocumentConvertMessage) -> list:
         """处理文档转换"""
         file_path = None
@@ -213,9 +245,37 @@ class DocumentConsumer:
             # 判断文件格式
             file_ext = os.path.splitext(file_path)[1].lower()
             
-            # Word文档：直接解析
+            # Word 文档：解析（返回题目列表 + 图片本地路径，需上传并替换占位符）
             if file_ext in ['.doc', '.docx']:
-                questions = self.parser.parse_document(file_path)
+                questions, image_paths = self.parser.parse_document(file_path)
+                if image_paths:
+                    try:
+                        import asyncio
+                        async def upload_docx_images():
+                            return await self._upload_docx_images_and_replace_placeholders(
+                                questions, image_paths, business_type="question_image"
+                            )
+                        try:
+                            loop = asyncio.get_event_loop()
+                            if loop.is_running():
+                                import concurrent.futures
+                                import threading
+                                box = {}
+                                def run():
+                                    new_loop = asyncio.new_event_loop()
+                                    asyncio.set_event_loop(new_loop)
+                                    box['result'] = new_loop.run_until_complete(upload_docx_images())
+                                    new_loop.close()
+                                t = threading.Thread(target=run)
+                                t.start()
+                                t.join()
+                                questions = box['result']
+                            else:
+                                questions = loop.run_until_complete(upload_docx_images())
+                        except RuntimeError:
+                            questions = asyncio.run(upload_docx_images())
+                    except Exception as e:
+                        logger.warning("Docx image upload failed, keeping placeholders: %s", e)
                 return questions
             
             # 其他格式：使用MarkItDown转换为Markdown，然后解析
