@@ -105,8 +105,6 @@ class ImageProcessor:
             图片URL（asset-service返回的URL）
         """
         try:
-            logger.info(f"Uploading image to asset-service: {image_path}")
-            
             # 读取图片文件
             with open(image_path, 'rb') as f:
                 image_data = f.read()
@@ -130,39 +128,76 @@ class ImageProcessor:
 
             # 调用 asset-service 上传接口（正确路径为 /asset/v1/files/upload，multipart）
             # 表单字段与 question-hub-web 一致：file + metadata(business_type, source)
+            upload_url = f"{self.asset_service_url}/asset/v1/files/upload"
+            logger.info(
+                "Uploading image to asset-service: image_path={}, app_id={}, url={}",
+                image_path,
+                effective_app_id,
+                upload_url,
+            )
             async with httpx.AsyncClient(timeout=60.0) as client:
                 headers = {"X-App-Id": effective_app_id}
                 if self.user_id:
                     headers["X-User-ID"] = self.user_id
 
+                # 打印请求是否带 X-App-Id 及其值，便于排查 400
+                has_app_id = "X-App-Id" in headers
+                app_id_value = headers.get("X-App-Id", "")
+                logger.info(
+                    "asset-service upload request: X-App-Id present={}, X-App-Id value={}",
+                    has_app_id,
+                    app_id_value if app_id_value else "(empty)",
+                )
+
                 response = await client.post(
-                    f"{self.asset_service_url}/asset/v1/files/upload",
+                    upload_url,
                     files=files,
                     data=data,
-                    headers=headers
+                    headers=headers,
                 )
-                response.raise_for_status()
-                
+
+                # 非 2xx 时记录响应体，便于排查 400 等原因（日志中的 file 为代码文件，此处显式记录上传的文件路径）
+                if not response.is_success:
+                    try:
+                        body = response.text
+                    except Exception:
+                        body = "(unable to read response body)"
+                    logger.error(
+                        "asset-service upload failed: image_path={}, status_code={}, response_body={}",
+                        image_path,
+                        response.status_code,
+                        body,
+                    )
+                    response.raise_for_status()
+
                 result = response.json()
-                
+
                 # 解析响应格式: { success: true, data: { fileId, fileName, ... } }
-                if result.get('success') and result.get('data'):
-                    # 获取文件URL（可能需要调用getFileURL接口）
-                    file_id = result['data'].get('fileId')
+                if result.get("success") and result.get("data"):
+                    file_id = result["data"].get("fileId")
                     if file_id:
-                        # 返回文件ID，实际URL可以通过getFileURL获取
-                        # 或者直接返回fileId，让前端调用getFileURL
                         file_url = f"{self.asset_service_url}/asset/v1/files/{file_id}/url"
-                        logger.info(f"Image uploaded successfully: file_id={file_id}")
+                        logger.info("Image uploaded successfully: image_path={}, file_id={}", image_path, file_id)
                         return file_url
-                    else:
-                        raise ValueError("Response does not contain fileId")
-                else:
-                    error_msg = result.get('errorMessage') or result.get('message') or 'Unknown error'
-                    raise ValueError(f"Upload failed: {error_msg}")
-                    
+                    raise ValueError("Response does not contain fileId")
+                error_msg = result.get("errorMessage") or result.get("message") or "Unknown error"
+                raise ValueError(f"Upload failed: {error_msg}")
+
+        except httpx.HTTPStatusError as e:
+            # 已在上面记录过 response_body，这里只补充 image_path 避免歧义
+            logger.error(
+                "Failed to upload image to asset-service: image_path={}, status={}, error={}",
+                image_path,
+                e.response.status_code if e.response else None,
+                str(e),
+            )
+            raise
         except Exception as e:
-            logger.error(f"Failed to upload image to asset-service: {e}")
+            logger.error(
+                "Failed to upload image to asset-service: image_path={}, error={}",
+                image_path,
+                str(e),
+            )
             raise
     
     def replace_images_in_markdown(
