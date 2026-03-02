@@ -120,7 +120,7 @@ class ImageProcessor:
                 'source': 'question_hub_document_service'
             }
             
-            # 调用asset-service API
+            # 调用 asset-service 上传接口（正确路径为 /asset/v1/files/upload，multipart）
             async with httpx.AsyncClient(timeout=60.0) as client:
                 headers = {}
                 if self.app_id:
@@ -129,7 +129,7 @@ class ImageProcessor:
                     headers['X-User-ID'] = self.user_id
                 
                 response = await client.post(
-                    f"{self.asset_service_url}/asset/v1/files",
+                    f"{self.asset_service_url}/asset/v1/files/upload",
                     files=files,
                     data=data,
                     headers=headers

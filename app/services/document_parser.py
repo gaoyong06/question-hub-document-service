@@ -73,9 +73,29 @@ class DocumentParser:
         
         # 根据协议类型处理
         if scheme in ('http', 'https'):
+            # 若 file_url 为对外网关 URL（如 https://api.xxx.com/asset/v1/files/xxx/content），
+            # 走网关会返回 401，后端服务应使用内网 asset-service 直连下载
+            download_url = file_url
+            try:
+                internal_parsed = urlparse(settings.asset_service_url)
+                internal_host = (internal_parsed.netloc or "").strip()
+                if internal_host and parsed.netloc != internal_host:
+                    path = (parsed.path or "").strip("/")
+                    if "files" in path and "asset/v1/files" in path:
+                        parts = path.split("/")
+                        if "files" in parts:
+                            idx = parts.index("files")
+                            if idx + 1 < len(parts):
+                                file_id = parts[idx + 1]
+                                if len(file_id) == 36 and file_id.count("-") == 4:
+                                    base = settings.asset_service_url.rstrip("/")
+                                    download_url = f"{base}/asset/v1/files/{file_id}/content"
+                                    logger.info(f"Using internal asset URL for download: {download_url}")
+            except Exception as e:
+                logger.warning(f"Could not resolve internal asset URL, using original: {e}")
             # HTTP/HTTPS: 通过HTTP下载
             with httpx.Client(timeout=settings.download_timeout) as client:
-                response = client.get(file_url)
+                response = client.get(download_url)
                 response.raise_for_status()
                 
                 # 检查响应类型
