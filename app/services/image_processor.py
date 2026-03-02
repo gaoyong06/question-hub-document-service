@@ -120,14 +120,21 @@ class ImageProcessor:
                 'source': 'question_hub_document_service'
             }
             
+            # asset-service 要求请求必须带 X-App-Id，否则返回 400（与 question-hub-web 一致）
+            # 使用 service.app_id（或环境变量 SERVICE_APP_ID），默认 question_hub
+            effective_app_id = (self.app_id or os.environ.get("SERVICE_APP_ID") or "question_hub").strip()
+            if not effective_app_id:
+                raise ValueError(
+                    "app_id is required for upload (set service.app_id or SERVICE_APP_ID in config, same as question-hub APP_ID)"
+                )
+
             # 调用 asset-service 上传接口（正确路径为 /asset/v1/files/upload，multipart）
+            # 表单字段与 question-hub-web 一致：file + metadata(business_type, source)
             async with httpx.AsyncClient(timeout=60.0) as client:
-                headers = {}
-                if self.app_id:
-                    headers['X-App-ID'] = self.app_id
+                headers = {"X-App-Id": effective_app_id}
                 if self.user_id:
-                    headers['X-User-ID'] = self.user_id
-                
+                    headers["X-User-ID"] = self.user_id
+
                 response = await client.post(
                     f"{self.asset_service_url}/asset/v1/files/upload",
                     files=files,

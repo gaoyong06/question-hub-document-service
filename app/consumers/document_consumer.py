@@ -36,7 +36,7 @@ class DocumentConsumer:
         self.markdown_parser = MarkdownParser()
         self.image_processor = ImageProcessor(
             asset_service_url=settings.asset_service_url,
-            app_id=settings.asset_service_app_id,
+            app_id=settings.app_id,
             user_id=""  # 可以从消息中获取
         )
     

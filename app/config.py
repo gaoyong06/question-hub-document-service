@@ -57,9 +57,10 @@ load_yaml_config()
 class Settings(BaseSettings):
     """应用配置"""
     
-    # 服务配置
+    # 服务配置（app_id 为本服务身份，调用 asset_service 等上游时携带 X-App-Id）
     service_name: str = Field(default="question-hub-document-service", alias="SERVICE_NAME")
     service_version: str = Field(default="1.0.0", alias="SERVICE_VERSION")
+    app_id: str = Field(default="", alias="SERVICE_APP_ID")
     
     # RocketMQ配置
     rocketmq_name_server: str = Field(
@@ -116,14 +117,10 @@ class Settings(BaseSettings):
         alias="SUPPORTED_EXTENSIONS"
     )
     
-    # Asset Service配置
+    # Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）
     asset_service_url: str = Field(
         default="http://localhost:8104",
         alias="ASSET_SERVICE_URL"
-    )
-    asset_service_app_id: str = Field(
-        default="",
-        alias="ASSET_SERVICE_APP_ID"
     )
     
     # OCR配置（可选）
