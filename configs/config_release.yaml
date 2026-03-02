@@ -54,9 +54,9 @@ document:
     - .xml
     - .epub
 
-# Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）
+# Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）。上传返回的 url 由 asset-service 根据其 storage.local.base_url 生成
 asset_service:
-  url: http://asset-service:8104  # 使用服务名
+  url: http://asset-service:8104  # 内网调用上传接口
 
 # OCR配置（可选）
 ocr:

@@ -18,13 +18,13 @@ class ImageProcessor:
     def __init__(self, asset_service_url: str, app_id: str = "", user_id: str = ""):
         """
         初始化图片处理器
-        
+
         Args:
-            asset_service_url: asset-service的URL
+            asset_service_url: 调用 asset-service 接口的 base URL（内网地址，如 http://asset-service:8104）
             app_id: 应用ID（可选）
             user_id: 用户ID（可选）
         """
-        self.asset_service_url = asset_service_url.rstrip('/')
+        self.asset_service_url = asset_service_url.rstrip("/")
         self.app_id = app_id
         self.user_id = user_id
         self.temp_dir = Path(settings.temp_file_dir) / "images"
@@ -172,14 +172,14 @@ class ImageProcessor:
 
                 result = response.json()
 
-                # 解析响应格式: { success: true, data: { fileId, fileName, ... } }
+                # 解析响应格式: { success: true, data: { fileId, url, ... } }，直接使用 asset-service 返回的 url（由 asset-service 负责生成可访问的公开 URL）
                 if result.get("success") and result.get("data"):
-                    file_id = result["data"].get("fileId")
-                    if file_id:
-                        file_url = f"{self.asset_service_url}/asset/v1/files/{file_id}/url"
-                        logger.info("Image uploaded successfully: image_path={}, file_id={}", image_path, file_id)
+                    data = result["data"]
+                    file_url = data.get("url") or ""
+                    if file_url:
+                        logger.info("Image uploaded successfully: image_path={}, file_id={}", image_path, data.get("fileId"))
                         return file_url
-                    raise ValueError("Response does not contain fileId")
+                    raise ValueError("asset-service response does not contain url (check asset-service storage.local.base_url config)")
                 error_msg = result.get("errorMessage") or result.get("message") or "Unknown error"
                 raise ValueError(f"Upload failed: {error_msg}")
 

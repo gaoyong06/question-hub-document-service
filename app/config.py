@@ -117,7 +117,7 @@ class Settings(BaseSettings):
         alias="SUPPORTED_EXTENSIONS"
     )
     
-    # Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）
+    # Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）。上传成功后嵌入内容的图片 URL 直接使用 asset-service 返回的 data.url
     asset_service_url: str = Field(
         default="http://localhost:8104",
         alias="ASSET_SERVICE_URL"
