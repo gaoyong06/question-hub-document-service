@@ -27,6 +27,17 @@ SECTION_HEADER_PATTERN = re.compile(
 )
 
 
+def _to_markdown_line_breaks(text: str) -> str:
+    """
+    将纯文本中的单换行转为 Markdown 行尾换行（两空格+换行），
+    便于前端 react-markdown 正确显示段内换行；已有双换行或「两空格+换行」则保持。
+    """
+    if not text or "\n" not in text:
+        return text or ""
+    # 避免把已经是「两空格+\n」的再重复加空格；将单 \n 转为 "  \n"
+    return re.sub(r"(?<!\n)(?<!  )\n(?!\n)", "  \n", text)
+
+
 class DocumentParser:
     """文档解析器（支持Word格式，其他格式通过MarkItDown转换）"""
     
@@ -345,16 +356,36 @@ class DocumentParser:
             path.write_bytes(blob)
             return str(path)
 
+        # 用于在段落内保留软换行（w:br）：按 XML 子节点顺序遍历，遇 w:br 插入 \n
+        w_br = qn("w:br")
+        w_r = qn("w:r")
+        w_t = qn("w:t")
+
         paragraphs: List[str] = []
         for para in doc.paragraphs:
             parts: List[str] = []
-            for run in para.runs:
+            run_idx = 0
+            for child in para._element:
+                if child.tag == w_br:
+                    parts.append("\n")
+                    continue
+                if child.tag != w_r:
+                    continue
+                run = para.runs[run_idx] if run_idx < len(para.runs) else None
+                run_idx += 1
+                if run is None:
+                    # 降级：直接从 w:r 取 w:t 文本
+                    for t in child.iter():
+                        if t.tag == w_t and t.text:
+                            parts.append(t.text)
+                        if t.tail:
+                            parts.append(t.tail)
+                    continue
                 if run._element is None:
                     if run.text:
                         parts.append(run.text)
                     continue
                 r_id = None
-                # DrawingML 图片：w:drawing -> a:blip @r:embed
                 drawing = run._element.find(qn("w:drawing"))
                 if drawing is not None:
                     blip = None
@@ -366,7 +397,6 @@ class DocumentParser:
                         blip = drawing.find(qn("a:blip"))
                     if blip is not None:
                         r_id = blip.get(qn("r:embed"))
-                # VML 图片（WPS/Word 旧格式）：w:pict -> v:imagedata @r:id
                 if r_id is None:
                     pict = run._element.find(qn("w:pict"))
                     if pict is not None:
@@ -521,6 +551,16 @@ class DocumentParser:
                         section_order, section_title = so, st
                 q.section_order = section_order
                 q.section_title = section_title
+        # 将题干/选项/答案/解析中的单换行转为 Markdown 换行，便于前端正确展示
+        for q in questions:
+            if q.content:
+                q.content = _to_markdown_line_breaks(q.content)
+            if q.answer:
+                q.answer = _to_markdown_line_breaks(q.answer)
+            if q.explanation:
+                q.explanation = _to_markdown_line_breaks(q.explanation)
+            if q.options:
+                q.options = [_to_markdown_line_breaks(o) for o in q.options]
         return questions
     
     def _extract_single_choice_with_pos(self, text: str, paragraphs: List[str]) -> List[Tuple[QuestionResult, int]]:
