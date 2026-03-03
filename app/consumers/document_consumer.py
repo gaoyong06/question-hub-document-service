@@ -6,7 +6,7 @@ import json
 import os
 import traceback
 import time
-from typing import Optional
+from typing import Optional, Tuple
 from loguru import logger
 
 from rocketmq.client import Producer, PushConsumer, Message, ConsumeStatus
@@ -170,13 +170,14 @@ class DocumentConsumer:
             logger.info(f"Processing conversion task: task_id={task_id}, file_url={message.file_url}")
             
             # 处理文档转换
-            questions = self._process_document(message)
+            questions, document_title = self._process_document(message)
             
-            # 发送成功结果
+            # 发送成功结果（document_title 供下游作为试卷名称）
             result_message = DocumentConvertResultMessage(
                 task_id=task_id,
                 status="completed",
-                result=questions
+                result=questions,
+                document_title=document_title or None
             )
             self._send_result(result_message)
             
@@ -235,9 +236,10 @@ class DocumentConsumer:
                     q.explanation = q.explanation.replace(ph, markdown_img)
         return questions
 
-    def _process_document(self, message: DocumentConvertMessage) -> list:
-        """处理文档转换"""
+    def _process_document(self, message: DocumentConvertMessage) -> tuple:
+        """处理文档转换。返回 (题目列表, document_title 或空字符串)。"""
         file_path = None
+        document_title = ""
         try:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
@@ -245,9 +247,9 @@ class DocumentConsumer:
             # 判断文件格式
             file_ext = os.path.splitext(file_path)[1].lower()
             
-            # Word 文档：解析（返回题目列表 + 图片本地路径，需上传并替换占位符）
+            # Word 文档：解析（返回题目列表 + 图片本地路径 + 文档标题，需上传并替换占位符）
             if file_ext in ['.doc', '.docx']:
-                questions, image_paths = self.parser.parse_document(file_path)
+                questions, image_paths, document_title = self.parser.parse_document(file_path)
                 if image_paths:
                     try:
                         import asyncio
@@ -276,7 +278,7 @@ class DocumentConsumer:
                             questions = asyncio.run(upload_docx_images())
                     except Exception as e:
                         logger.warning("Docx image upload failed, keeping placeholders: %s", e)
-                return questions
+                return questions, document_title
             
             # 其他格式：使用MarkItDown转换为Markdown，然后解析
             if not self.markdown_converter:
@@ -356,7 +358,8 @@ class DocumentConsumer:
                     question.images = []
                 question.images.extend(image_urls)
             
-            return questions
+            # 非 Word 格式暂无文档标题，使用空字符串
+            return questions, (metadata.get("title", "").strip() if metadata else "")
             
         finally:
             # 清理临时文件

@@ -25,6 +25,8 @@ SECTION_HEADER_PATTERN = re.compile(
     r"^([一二三四五六七八九十]+)[\.．、]\s*(.+)$",
     re.MULTILINE,
 )
+# 答案/题干截断边界：下一小题题号（数字.）或换行后跟大题标题（一. 二. …）或文末。用于正则中避免把下一大题标题吃进本题
+ANSWER_END_LOOKAHEAD = r"(?=\d+[\.．、]|\n\s*[一二三四五六七八九十]+[\.．、]|\Z)"
 
 
 def _to_markdown_line_breaks(text: str) -> str:
@@ -307,8 +309,16 @@ class DocumentParser:
                 raise FileNotFoundError(f"File was deleted before parsing: {file_path}")
 
             doc = Document(file_path)
+            # 文档标题：优先 core_properties.title，否则取首段非空文本（供下游作为试卷名称）
+            document_title = (getattr(doc.core_properties, "title", None) or "").strip()
             # 带图片占位符的段落文本、以及本 doc 中出现的图片本地路径（按出现顺序）
             paragraphs, image_paths = self._extract_paragraphs_with_images(doc, file_path)
+            if not document_title and paragraphs:
+                for p in paragraphs:
+                    t = (p or "").strip()
+                    if t and not t.startswith("{{IMAGE_"):
+                        document_title = t[:200].strip()
+                        break
 
             full_text = "\n".join(paragraphs)
             if full_text:
@@ -336,7 +346,7 @@ class DocumentParser:
                 logger.warning("No questions extracted, but document has content. Check regex patterns.")
                 logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
 
-            return questions, image_paths
+            return questions, image_paths, document_title
 
         except Exception as e:
             logger.error("Failed to parse document: %s", e)
@@ -603,7 +613,8 @@ class DocumentParser:
 
     def _extract_fill_blank_with_pos(self, text: str, paragraphs: List[str]) -> List[Tuple[QuestionResult, int]]:
         result: List[Tuple[QuestionResult, int]] = []
-        pat = r'(\d+[\.、]?\s*.+?[（(].*?[）)]|.+?___.+?)\s+答案[：:]\s*(.+?)(?=\d+[\.、]|$)'
+        # 答案截断边界：下一小题（\d+[\.、]）或换行+大题标题（一. 二. …）或文末，按格式区分不把下一大题标题吃进答案
+        pat = r"(\d+[\.、]?\s*.+?[（(].*?[）)]|.+?___.+?)\s+答案[：:]\s*(.+?)" + ANSWER_END_LOOKAHEAD
         for m in re.finditer(pat, text, re.DOTALL | re.MULTILINE):
             result.append((
                 QuestionResult(type="fill-blank", content=m.group(1).strip(), answer=m.group(2).strip(), difficulty="medium", grade=1, subject=""),
@@ -613,6 +624,16 @@ class DocumentParser:
         for para in paragraphs:
             para = para.strip()
             if not para:
+                continue
+            # 大题标题行（如「二.判断题(共6题，共12分)）」不参与题干拼接，避免混入上一题
+            if SECTION_HEADER_PATTERN.match(para) or re.match(r"^[一二三四五六七八九十]+[\.．、]\s*[选判填计作解].*$", para):
+                if current_question and current_content:
+                    content = "\n".join(current_content).strip()
+                    if ("（" in content or "(" in content or "）" in content or ")" in content or "___" in content):
+                        if not any(q.content == content or content in q.content for q, _ in result):
+                            pos = text.find(content) if content in text else len(text)
+                            result.append((QuestionResult(type="fill-blank", content=content, answer="", difficulty="medium", grade=1, subject=""), pos))
+                current_question, current_content = None, []
                 continue
             # 题号支持半角点、全角点、顿号：1. 1． 1、
             if re.match(r'^\d+[\.．、]', para):

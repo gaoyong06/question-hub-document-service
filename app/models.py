@@ -40,6 +40,8 @@ class DocumentConvertResultMessage(BaseModel):
     status: str = Field(..., alias="status")  # completed, failed
     result: Optional[List[QuestionResult]] = Field(default=None, alias="result")
     error_msg: Optional[str] = Field(default=None, alias="error_msg")
+    # 文档内标题，供下游作为试卷名称（优先于文件名）
+    document_title: Optional[str] = Field(default=None, alias="document_title")
     
     class Config:
         populate_by_name = True
