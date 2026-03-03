@@ -88,15 +88,26 @@
 
 - 你们已有 MarkItDown（PDF 等 → Markdown），若 PDF 解析后也得到 Markdown，可复用「题目 content 统一为 Markdown」的约定，前端展示逻辑一致。
 
-## 六、小结
+## 六、三个环节与「题干与选项换行」问题定位
+
+| 环节 | 职责 | 题干与选项换行问题中的表现 |
+|------|------|----------------------------|
+| 1. 解析 docx | 按段落/段内换行提取，得到 `paragraphs` 与 `full_text = "\n".join(paragraphs)` | 正确：题干与 "A." 在不同段时，full_text 中已有 `题干\nA.\n...` |
+| 2. 反映在 markdown | 从 full_text 切出题干/选项并写入 content、options | **问题**：正则中 `(.+?)\s+(A\. ...)` 的 `\s+` 消耗了题干后的换行，但 content 只存了 group(1).strip()，**没有把 docx 的段落边界写入 content** |
+| 3. Markdown 显示 | 前端用 Markdown 渲染 content | 若 content 中带 `\n\n`，会正确分段；之前因环节 2 未写入断行而显示成一行 |
+
+**修复原则**：不在后续环节「补逻辑」；在**提取阶段**就把 docx 的格式反映到存库的 markdown 里。单选题/多选题在提取时对 content 使用 `题干.strip() + "\n\n"`，表示「题干后有一个段落边界再是选项」，这样存库的 content 与 docx 结构一致，前端按 markdown 渲染即可。
+
+## 七、小结
 
 | 问题 | 建议 |
 |------|------|
 | 该换行没换行 | 解析时保留段内 `<w:br/>`，输出时把单 `\n` 转为 Markdown 换行（`  \n` 或 `\n\n`），整体用 Markdown 存储/展示。 |
-| 不该换行有换行/错位 | 优化题目切分逻辑：以段落/块为单位识别题目边界，再在块内保留换行，避免正则跨题匹配。 |
+| 题干与选项之间换行 | 问题在「反映在 markdown」环节：提取时 content 未包含题干后的段落边界。应在提取单选题/多选题时把「题干后的段落断行」写入 content（如 content = 题干 + `\n\n`），而不是在后续统一处理里按题型补逻辑。 |
+| 不该换行有换行/错位 | 优化题目切分逻辑：以段落/块为单位识别题目边界；或将「仅图片占位符」的段合并到上一段（选项字母与图同段），避免多余换行。 |
 | 是否整体用 Markdown | **有必要**；题干/选项/答案/解析都使用 Markdown，与前端 `MarkdownDisplay` 一致，便于原样还原版式。 |
 | 行业实践 | Docx→HTML 最保真但成本高；Docx→Markdown + 题目切分 更贴合现有技术栈，也便于扩展公式与图片。 |
 
 实现上可优先做两件事：  
 1）在 `_extract_paragraphs_with_images` 中按 `para._element` 处理 `w:br`，输出带段内换行的段落文本；  
-2）在写入题目 content/options 时，将单 `\n` 转为 `  \n`（或统一成 `\n\n`/`  \n` 的简单规则），保证前端 Markdown 渲染与 Word 观感一致。
+2）在**提取**题目时就把 docx 的段落/换行反映到 content/options（题干后段落边界 → content 末尾 `\n\n`；选项字母与图同段 → 合并「仅图片」段到上一段），保证存库的 markdown 与 docx 一致，前端只负责正确渲染。

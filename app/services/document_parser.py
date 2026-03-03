@@ -564,11 +564,12 @@ class DocumentParser:
         return questions
     
     def _extract_single_choice_with_pos(self, text: str, paragraphs: List[str]) -> List[Tuple[QuestionResult, int]]:
-        """提取单选题，返回 (题目, 起始位置)。"""
+        """提取单选题，返回 (题目, 起始位置)。题干与选项在 docx 中为不同段落，content 末尾保留段落断行以反映该格式。"""
         result: List[Tuple[QuestionResult, int]] = []
         pattern = r'(\d+[\.、]?\s*.+?)\s+(A[\.、\s]\s*.+?)\s+(B[\.、\s]\s*.+?)\s+(C[\.、\s]\s*.+?)\s+(D[\.、\s]\s*.+?)\s+答案[：:]\s*([ABCD])'
         for m in re.finditer(pattern, text, re.DOTALL | re.MULTILINE):
-            content = m.group(1).strip()
+            # 题干后在本段与 A. 之间在 docx 中有段落边界，在 markdown 中用 \n\n 反映
+            content = m.group(1).strip() + "\n\n"
             oa, ob, oc, od = (re.sub(r'^[A-D][\.、]\s*', '', m.group(i).strip()) for i in range(2, 6))
             ans = m.group(6).strip()
             result.append((
@@ -580,20 +581,22 @@ class DocumentParser:
             for m in re.finditer(alt, text, re.DOTALL | re.MULTILINE):
                 oa, ob, oc, od = (re.sub(r'^[A-D][\.、]\s*', '', m.group(i).strip()) for i in range(2, 6))
                 result.append((
-                    QuestionResult(type="single-choice", content=m.group(1).strip(), options=[oa, ob, oc, od], answer=m.group(6).strip(), difficulty="medium", grade=1, subject=""),
+                    QuestionResult(type="single-choice", content=m.group(1).strip() + "\n\n", options=[oa, ob, oc, od], answer=m.group(6).strip(), difficulty="medium", grade=1, subject=""),
                     m.start(),
                 ))
         return result
 
     def _extract_multiple_choice_with_pos(self, text: str, paragraphs: List[str]) -> List[Tuple[QuestionResult, int]]:
+        """题干与选项在 docx 中为不同段落，content 末尾保留段落断行以反映该格式。"""
         result: List[Tuple[QuestionResult, int]] = []
         pattern = r'(\d+[\.、]?\s*.+?)\s+(A[\.、]\s*.+?)\s+(B[\.、]\s*.+?)\s+(C[\.、]\s*.+?)\s+(D[\.、]\s*.+?)\s+答案[：:]\s*([ABCD]+)'
         for m in re.finditer(pattern, text, re.DOTALL | re.MULTILINE):
             if len(m.group(6)) <= 1:
                 continue
+            content = m.group(1).strip() + "\n\n"
             oa, ob, oc, od = (re.sub(r'^[A-D][\.、]\s*', '', m.group(i).strip()) for i in range(2, 6))
             result.append((
-                QuestionResult(type="multiple-choice", content=m.group(1).strip(), options=[oa, ob, oc, od], answer=m.group(6).strip(), difficulty="medium", grade=1, subject=""),
+                QuestionResult(type="multiple-choice", content=content, options=[oa, ob, oc, od], answer=m.group(6).strip(), difficulty="medium", grade=1, subject=""),
                 m.start(),
             ))
         return result
