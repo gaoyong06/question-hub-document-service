@@ -8,6 +8,7 @@ import re
 import tempfile
 import zipfile
 import uuid
+from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 from pathlib import Path
 from docx import Document
@@ -31,6 +32,126 @@ SECTION_HEADER_PATTERN = re.compile(
 )
 # 答案/题干截断边界：下一小题题号（数字.）或换行后跟大题标题（一. 二. …）或文末。用于正则中避免把下一大题标题吃进本题
 ANSWER_END_LOOKAHEAD = r"(?=\d+[\.．、]|\n\s*[一二三四五六七八九十]+[\.．、]|\Z)"
+
+# 小题题号：段落以数字+点/顿号开头，表示新一题（强匹配，流式时用）
+QUESTION_START_PATTERN = re.compile(r"^\d+[\.．、]\s*", re.MULTILINE)
+
+# 宽松大题：无「一. 二.」时，以题型词或「第X部分/节」开头的短行视为大题标题
+SECTION_RELAXED_KEYWORDS = (
+    "选择题", "单选题", "多选题", "填空题", "判断题", "解答题", "计算题", "作图题",
+    "第一部分", "第一节", "第二部分", "第二节", "第三部分", "第三节", "第四节", "第五节",
+)
+SECTION_RELAXED_PATTERN = re.compile(
+    r"^(?:第[一二三四五六七八九十\d]+[部分节]\s*)?(?:选择题|单选题|多选题|填空题|判断题|解答题|计算题|作图题).*$"
+)
+# 大题标题最大长度（超过则视为正文段落，避免误判）
+SECTION_TITLE_MAX_LEN = 80
+
+# 小题多模式拆分：用于将一大题下的整块内容拆成多道小题（按题号/段落等）
+# 顺序：行首（或换行后）出现下列之一即视为新小题开始
+QUESTION_SPLIT_PATTERNS = [
+    re.compile(r"(?:^|\n)\s*(?=\d+[\.．、]\s)", re.MULTILINE),   # 1. 2. 3.
+    re.compile(r"(?:^|\n)\s*(?=[a-dA-D][\.．、]\s)", re.MULTILINE),  # a. b. c. d.
+    re.compile(r"(?:^|\n)\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])", re.MULTILINE),   # ①②③
+    re.compile(r"(?:^|\n)\s*(?=\(\d+\)\s)", re.MULTILINE),          # (1) (2)
+]
+
+
+def _is_relaxed_section_heading(line: str) -> bool:
+    """宽松判断：该行是否像大题标题（无「一. 二.」时用）。"""
+    p = (line or "").strip()
+    if not p or len(p) > SECTION_TITLE_MAX_LEN:
+        return False
+    if SECTION_HEADER_PATTERN.match(p):
+        return True
+    if SECTION_RELAXED_PATTERN.match(p):
+        return True
+    return any(k in p for k in SECTION_RELAXED_KEYWORDS) and len(p) <= SECTION_TITLE_MAX_LEN
+
+
+# 格式辅助：正文默认字号（pt），用于判断「明显大于正文」的标题
+DEFAULT_BODY_FONT_PT = 12.0
+# 若段落字号 >= 此值且大于正文，可视为标题
+SECTION_HEADING_FONT_PT_MIN = 14.0
+
+
+def _format_suggests_section_heading(
+    fmt: Optional[ParagraphFormatInfo],
+    body_font_pt: float = DEFAULT_BODY_FONT_PT,
+) -> bool:
+    """根据段落格式判断是否像大题标题（辅助，与文字规则结合使用）。"""
+    if fmt is None:
+        return False
+    style = (fmt.style_name or "").strip().lower()
+    if "heading" in style or "标题" in style or style.startswith("heading") or style.startswith("标题"):
+        return True
+    if fmt.font_size_pt is not None and fmt.font_size_pt >= SECTION_HEADING_FONT_PT_MIN and fmt.font_size_pt > body_font_pt:
+        return True
+    if fmt.is_bold and fmt.left_indent_pt <= 0 and fmt.first_line_indent_pt <= 0:
+        return True
+    return False
+
+
+def _split_section_content_into_questions(block: str) -> List[str]:
+    """
+    将一大题下的整块文本拆成多道小题。多模式：先按题号形式（1. / a. / ①② / (1)）拆，
+    若无则按双换行、再按单换行拆；若仍只有一段则整块作为一题。
+    """
+    block = (block or "").strip()
+    if not block:
+        return []
+    for pattern in QUESTION_SPLIT_PATTERNS:
+        parts = pattern.split(block)
+        parts = [p.strip() for p in parts if p.strip()]
+        if len(parts) >= 2:
+            return parts
+    # 按双换行拆成多段
+    parts = re.split(r"\n\s*\n", block)
+    parts = [p.strip() for p in parts if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    # 按单换行拆（每段一题）
+    parts = [p.strip() for p in block.split("\n") if p.strip()]
+    if len(parts) >= 2:
+        return parts
+    return [block]
+
+
+@dataclass
+class ParagraphFormatInfo:
+    """Word 段落格式信息，用于辅助判断大题/小题（结构优先）。无格式时为 None。"""
+    style_name: str = ""
+    font_size_pt: Optional[float] = None
+    left_indent_pt: float = 0.0
+    first_line_indent_pt: float = 0.0
+    is_bold: bool = False
+
+
+@dataclass
+class ParsedStructure:
+    """流式解析得到的试卷结构，再映射为业务题目与元数据。"""
+    document_title: str = ""
+    document_description: str = ""
+    # 每个元素：(section_order, section_title, 该大题下各小题的 content 列表)
+    sections: List[Tuple[int, str, List[str]]] = field(default_factory=list)
+    # 参考答案区块的起始段落下标，用于从 paragraphs 截取答案区文本
+    answer_block_para_start: Optional[int] = None
+
+
+def _section_title_to_question_type(section_title: str) -> str:
+    """根据大题标题映射为系统题型（与 question 表 type 一致）。"""
+    if not section_title:
+        return QUESTION_TYPES[2]  # fill-blank 兜底
+    if "选择题" in section_title or "单选题" in section_title:
+        return QUESTION_TYPES[0]  # single-choice
+    if "多选题" in section_title:
+        return QUESTION_TYPES[1]  # multiple-choice
+    if "判断题" in section_title:
+        return QUESTION_TYPES[3]  # judge
+    if "解答题" in section_title:
+        return QUESTION_TYPES[4]  # essay
+    # 填空题、计算题、作图题等
+    return QUESTION_TYPES[2]  # fill-blank
 
 
 def _to_markdown_line_breaks(text: str) -> str:
@@ -339,8 +460,8 @@ class DocumentParser:
             doc = Document(file_path)
             # 文档标题：优先 core_properties.title，否则取首段非空文本（供下游作为试卷名称）
             document_title = (getattr(doc.core_properties, "title", None) or "").strip()
-            # 带图片占位符的段落文本、以及本 doc 中出现的图片本地路径（按出现顺序）
-            paragraphs, image_paths = self._extract_paragraphs_with_images(doc, file_path)
+            # 带图片占位符的段落文本、图片路径、每段格式信息（供结构解析辅助大题/小题判断）
+            paragraphs, image_paths, format_infos = self._extract_paragraphs_with_images(doc, file_path)
             if not document_title and paragraphs:
                 for p in paragraphs:
                     t = (p or "").strip()
@@ -356,39 +477,78 @@ class DocumentParser:
             else:
                 logger.warning("No text content extracted from document")
 
-            # 解析卷末「参考答案」区块，得到按题号顺序的答案列表
+            # 优先：流式结构解析（先解析结构，再映射为业务数据；有格式时用格式辅助大题判断）
+            structure = self._parse_structure(paragraphs, format_infos)
+            total_from_structure = sum(len(contents) for _, _, contents in structure.sections)
+            if total_from_structure > 0:
+                answer_block_text = ""
+                if structure.answer_block_para_start is not None:
+                    answer_block_text = "\n".join(paragraphs[structure.answer_block_para_start:])
+                reference_answers = self._parse_reference_answers(answer_block_text) if answer_block_text else []
+                logger.info("Structure path: sections=%s, questions=%s, reference_answers=%s",
+                            len(structure.sections), total_from_structure, len(reference_answers))
+                questions = self._structure_to_questions(structure, paragraphs, reference_answers)
+                if structure.document_title:
+                    document_title = structure.document_title
+                if structure.document_description:
+                    document_description = structure.document_description
+                logger.info("Extracted %s questions from document (structure path)", len(questions))
+                return questions, image_paths, document_title, document_description
+
+            # 回退：原正则流程
             reference_answers = self._parse_reference_answers(full_text)
             logger.info("Parsed reference answers count: %s", len(reference_answers))
-
-            # 识别大题标题与位置（用于给题目打上 section_title / section_order）
             sections = self._detect_sections(full_text)
             logger.info("Detected sections count: %s", len(sections))
-
-            # 识别题目（返回带文档内位置的题目，便于按顺序回填答案与归属大题）
             questions_with_pos = self._extract_questions_with_positions(full_text, paragraphs)
-            # 按文档顺序排序、回填参考答案并归属大题
             questions = self._sort_and_fill_answers(questions_with_pos, reference_answers, sections)
-
-            # 解析「注意事项」区块，供下游作为试卷 description；未解析到则为空
             document_description = self._parse_document_description(full_text)
             if document_description:
                 logger.info("Extracted document_description (notes) length: %s chars", len(document_description))
-
-            logger.info("Extracted %s questions from document", len(questions))
+            logger.info("Extracted %s questions from document (fallback path)", len(questions))
             if len(questions) == 0 and paragraphs:
                 logger.warning("No questions extracted, but document has content. Check regex patterns.")
                 logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
-
             return questions, image_paths, document_title, document_description
 
         except Exception as e:
             logger.error("Failed to parse document: %s", e)
             raise
 
-    def _extract_paragraphs_with_images(self, doc: Document, file_path: str) -> Tuple[List[str], List[str]]:
+    def _get_paragraph_format(self, para) -> ParagraphFormatInfo:
+        """从 python-docx 段落对象提取格式信息，用于格式辅助结构判断。"""
+        fmt = ParagraphFormatInfo()
+        try:
+            fmt.style_name = getattr(para.style, "name", None) or ""
+            pf = getattr(para, "paragraph_format", None)
+            if pf is not None:
+                li = getattr(pf, "left_indent", None)
+                fmt.left_indent_pt = float(getattr(li, "pt", 0) or 0)
+                fl = getattr(pf, "first_line_indent", None)
+                fmt.first_line_indent_pt = float(getattr(fl, "pt", 0) or 0)
+            font_sizes: List[float] = []
+            bold_count = 0
+            text_run_count = 0
+            for run in getattr(para, "runs", []):
+                if getattr(run, "text", "").strip():
+                    text_run_count += 1
+                    if getattr(run, "bold", None) is True:
+                        bold_count += 1
+                    sz = getattr(run.font, "size", None)
+                    if sz is not None and hasattr(sz, "pt"):
+                        font_sizes.append(float(sz.pt))
+            if font_sizes:
+                fmt.font_size_pt = max(font_sizes)
+            fmt.is_bold = text_run_count > 0 and bold_count >= (text_run_count + 1) // 2
+        except Exception as e:
+            logger.debug("Failed to get paragraph format: %s", e)
+        return fmt
+
+    def _extract_paragraphs_with_images(self, doc: Document, file_path: str) -> Tuple[List[str], List[str], List[ParagraphFormatInfo]]:
         """
         提取段落文本，并将文档中的内嵌图片导出为临时文件，在文本中用 {{IMAGE_N}} 占位。
-        返回 (段落列表（含占位符）, 图片本地路径列表，与占位符下标对应)。
+        同时提取每段格式信息（样式、字号、缩进、加粗），供结构解析辅助判断大题/小题。
+        返回 (段落列表, 图片路径列表, 每段对应的格式信息列表，与段落一一对应)。
         """
         image_paths: List[str] = []
         image_dir = self.temp_dir / "docx_images"
@@ -399,13 +559,14 @@ class DocumentParser:
             path.write_bytes(blob)
             return str(path)
 
-        # 用于在段落内保留软换行（w:br）：按 XML 子节点顺序遍历，遇 w:br 插入 \n
         w_br = qn("w:br")
         w_r = qn("w:r")
         w_t = qn("w:t")
 
         paragraphs: List[str] = []
+        format_infos: List[ParagraphFormatInfo] = []
         for para in doc.paragraphs:
+            fmt = self._get_paragraph_format(para)
             parts: List[str] = []
             run_idx = 0
             for child in para._element:
@@ -417,7 +578,6 @@ class DocumentParser:
                 run = para.runs[run_idx] if run_idx < len(para.runs) else None
                 run_idx += 1
                 if run is None:
-                    # 降级：直接从 w:r 取 w:t 文本
                     for t in child.iter():
                         if t.tag == w_t and t.text:
                             parts.append(t.text)
@@ -466,8 +626,8 @@ class DocumentParser:
             line = "".join(parts).strip()
             if line:
                 paragraphs.append(line)
+                format_infos.append(fmt)
 
-        # 若 python-docx 未暴露 related_parts/blob，则退化为从 zip 解压 word/media
         if not image_paths and doc.paragraphs:
             try:
                 with zipfile.ZipFile(file_path, "r") as zf:
@@ -478,13 +638,10 @@ class DocumentParser:
                         local_path = str(image_dir / f"img_{i}{ext}")
                         Path(local_path).write_bytes(data)
                         image_paths.append(local_path)
-                # 按文档中引用顺序：遍历 document.xml 找 r:embed 顺序（与 media 名对应需通过 rels）
-                # 此处简化：若从 zip 解压，则占位符按 media 顺序插入到全文末尾会错位，故仅当上面 drawing 路径已取到图时才插占位符；zip 路径仅作补充提取，不插占位符
-                # 若需 zip 路径也插占位符，需解析 document.xml 与 rels 确定顺序，这里先不实现
             except Exception as e:
                 logger.debug("Fallback zip media extraction failed: %s", e)
 
-        return paragraphs, image_paths
+        return paragraphs, image_paths, format_infos
 
     def _parse_reference_answers(self, full_text: str) -> List[str]:
         """
@@ -556,6 +713,187 @@ class DocumentParser:
         description = block[:end_pos].strip()
         return _to_markdown_line_breaks(description) if description else ""
 
+    def _parse_structure(
+        self,
+        paragraphs: List[str],
+        paragraph_formats: Optional[List[ParagraphFormatInfo]] = None,
+    ) -> ParsedStructure:
+        """
+        流式解析试卷结构：从上到下逐段识别 试卷标题 / 注意事项 / 大题 / 小题 / 参考答案。
+        大题：强匹配「一. 二.」或宽松匹配题型词/「第X部分、节」等；有格式时可用样式/字号/缩进/加粗辅助。
+        小题：整块收集后再按多模式拆分（1. a. ①② (1)、双换行、单换行）。
+        """
+        order_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        next_order = 11
+        implicit_section_order = 1
+        structure = ParsedStructure()
+        current_section: Optional[Tuple[int, str]] = None
+        current_question_lines: List[str] = []
+        title_done = False
+        in_notes = False
+        notes_lines: List[str] = []
+
+        # 正文代表字号（用于格式判断「明显大于正文」的标题）；有格式列表时取中位数
+        body_font_pt = DEFAULT_BODY_FONT_PT
+        if paragraph_formats and len(paragraph_formats) == len(paragraphs):
+            sizes = [f.font_size_pt for f in paragraph_formats if f and getattr(f, "font_size_pt", None) is not None]
+            if sizes:
+                sorted_sizes = sorted(sizes)
+                body_font_pt = sorted_sizes[len(sorted_sizes) // 2]
+
+        def flush_section() -> None:
+            """将当前大题下的整块内容按多模式拆成小题，追加到 structure.sections。"""
+            nonlocal current_section, current_question_lines
+            if not current_section:
+                return
+            block = "\n".join(current_question_lines).strip()
+            section_questions = _split_section_content_into_questions(block) if block else []
+            structure.sections.append((current_section[0], current_section[1], section_questions))
+            current_section = None
+            current_question_lines = []
+
+        for i, para in enumerate(paragraphs):
+            p = (para or "").strip()
+            fmt = paragraph_formats[i] if paragraph_formats and i < len(paragraph_formats) else None
+            if not p:
+                if current_section and current_question_lines:
+                    current_question_lines.append("")
+                elif in_notes:
+                    notes_lines.append("")
+                continue
+
+            # 1. 参考答案区块
+            if any(h in p for h in REFERENCE_ANSWER_HEADERS) and (
+                p.startswith("参考答案") or p.startswith("标准答案") or (p.startswith("答案") and len(p) <= 10)
+            ):
+                flush_section()
+                structure.answer_block_para_start = i
+                break
+
+            # 2. 注意事项（仅当段落以「注意事项」开头时进入）
+            if p.startswith("注意事项"):
+                in_notes = True
+                start = len("注意事项")
+                if start < len(p) and p[start] in "：:":
+                    start += 1
+                rest = p[start:].strip()
+                if rest:
+                    notes_lines.append(rest)
+                continue
+            if in_notes:
+                if (
+                    SECTION_HEADER_PATTERN.match(p)
+                    or _is_relaxed_section_heading(p)
+                    or _format_suggests_section_heading(fmt, body_font_pt)
+                ):
+                    in_notes = False
+                    structure.document_description = _to_markdown_line_breaks("\n".join(notes_lines).strip())
+                    notes_lines = []
+                else:
+                    notes_lines.append(p)
+                    continue
+
+            # 3. 大题标题：强匹配「一. 二.」或宽松匹配（题型词、第X部分/节等），或格式像标题
+            section_match = SECTION_HEADER_PATTERN.match(p)
+            if section_match:
+                flush_section()
+                cn_num, rest = section_match.group(1), section_match.group(2).strip()
+                order = order_map.get(cn_num)
+                if order is None:
+                    order = next_order
+                    next_order += 1
+                title = (cn_num + "." + rest) if not rest.startswith(".") else (cn_num + rest)
+                current_section = (order, title)
+                current_question_lines = []
+                continue
+            if _is_relaxed_section_heading(p) or _format_suggests_section_heading(fmt, body_font_pt):
+                flush_section()
+                current_section = (implicit_section_order, p)
+                implicit_section_order += 1
+                current_question_lines = []
+                continue
+
+            # 4. 无大题时的题号行：仅作试卷标题候选
+            if QUESTION_START_PATTERN.match(p) and not current_section:
+                if not title_done and not structure.document_title:
+                    structure.document_title = p[:200].strip()
+                    title_done = True
+                continue
+
+            # 5. 归属当前大题或标题/注意事项
+            if current_section:
+                current_question_lines.append(p)
+            elif not title_done and not in_notes:
+                if not structure.document_title:
+                    structure.document_title = p[:200].strip()
+                title_done = True
+            elif in_notes:
+                notes_lines.append(p)
+
+        if in_notes and notes_lines:
+            structure.document_description = _to_markdown_line_breaks("\n".join(notes_lines).strip())
+        flush_section()
+
+        return structure
+
+    def _structure_to_questions(
+        self,
+        structure: ParsedStructure,
+        paragraphs: List[str],
+        reference_answers: List[str],
+    ) -> List[QuestionResult]:
+        """将解析出的结构映射为业务题目列表：小题题型由所属大题决定，答案按参考答案顺序回填。"""
+        questions: List[QuestionResult] = []
+        for section_order, section_title, contents in structure.sections:
+            q_type = _section_title_to_question_type(section_title)
+            for content in contents:
+                if not content or not content.strip():
+                    continue
+                content = content.strip()
+                options: Optional[List[str]] = None
+                stem = content
+                if q_type in (QUESTION_TYPES[0], QUESTION_TYPES[1]) and _content_has_choice_options(content):
+                    stem, opts = _parse_stem_and_options_from_choice_content(content)
+                    if len(opts) >= 2:
+                        options = opts
+                q = QuestionResult(
+                    type=q_type,
+                    content=stem,
+                    options=options,
+                    answer="",
+                    difficulty="medium",
+                    grade=1,
+                    subject="",
+                    section_order=section_order,
+                    section_title=section_title,
+                )
+                questions.append(q)
+
+        # 回填参考答案（按全局题序）
+        for i, q in enumerate(questions):
+            if not (q.answer and q.answer.strip()) and i < len(reference_answers):
+                raw = reference_answers[i].strip()
+                if q.type == QUESTION_TYPES[3]:  # judge
+                    q.answer = "true" if raw in ("对", "正确", "√", "T", "t") else ("false" if raw in ("错", "错误", "×", "F", "f") else raw)
+                else:
+                    q.answer = raw
+
+        # Markdown 换行
+        for q in questions:
+            if q.content:
+                q.content = _to_markdown_line_breaks(q.content)
+            if q.answer:
+                q.answer = _to_markdown_line_breaks(q.answer)
+            if q.options:
+                q.options = [_to_markdown_line_breaks(o) for o in q.options]
+
+        # 题型合法性兜底
+        for q in questions:
+            if q.type not in QUESTION_TYPES:
+                logger.warning("Question type %r not in QUESTION_TYPES, fallback to fill-blank", q.type)
+                q.type = QUESTION_TYPES[2]
+        return questions
+
     def _extract_questions_with_positions(
         self, full_text: str, paragraphs: List[str]
     ) -> List[Tuple[QuestionResult, int]]:
@@ -577,17 +915,31 @@ class DocumentParser:
 
     def _detect_sections(self, full_text: str) -> List[Tuple[int, str, int]]:
         """
-        检测大题标题及其在全文中的起始位置。
+        检测大题标题及其在全文中的起始位置，得到试卷结构。
+        同一大题（同一 section_order）在文档中可能多次出现（如正文「四.计算题(共3题，共31分)」
+        与参考答案中「四.计算题」），只保留每种 order 的第一次出现，避免同一大题被拆成多个分组。
         返回 [(section_order, section_title, start_pos), ...]，按 start_pos 递增。
         """
-        sections: List[Tuple[int, int, str]] = []  # (pos, order, title)
+        raw: List[Tuple[int, int, str]] = []  # (pos, order, title)
         order_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+        next_order = 11  # 十一、十二等未在 order_map 中时递增加
         for m in SECTION_HEADER_PATTERN.finditer(full_text):
             cn_num, rest = m.group(1), m.group(2).strip()
-            order = order_map.get(cn_num, len(sections) + 1)
+            order = order_map.get(cn_num)
+            if order is None:
+                order = next_order
+                next_order += 1
             title = (cn_num + "." + rest) if not rest.startswith(".") else (cn_num + rest)
-            sections.append((m.start(), order, title))
-        sections.sort(key=lambda x: x[0])
+            raw.append((m.start(), order, title))
+        raw.sort(key=lambda x: x[0])
+        # 每个 section_order 只保留第一次出现（最小 pos），对应试卷正文中的大题标题
+        seen_order: set = set()
+        sections: List[Tuple[int, int, str]] = []
+        for pos, order, title in raw:
+            if order in seen_order:
+                continue
+            seen_order.add(order)
+            sections.append((pos, order, title))
         return [(order, title, pos) for pos, order, title in sections]
 
     def _sort_and_fill_answers(
