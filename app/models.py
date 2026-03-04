@@ -44,6 +44,10 @@ class DocumentConvertResultMessage(BaseModel):
     document_title: Optional[str] = Field(default=None, alias="document_title")
     # 文档内「注意事项」区块内容，供下游作为试卷 description；未解析到则为空/不传
     document_description: Optional[str] = Field(default=None, alias="document_description")
+    # 识别出的年级（1-9），未识别为 0 或不传
+    document_grade: Optional[int] = Field(default=None, alias="document_grade")
+    # 识别出的学科（如数学、语文），未识别为空或不传
+    document_subject: Optional[str] = Field(default=None, alias="document_subject")
 
     class Config:
         populate_by_name = True

@@ -169,16 +169,18 @@ class DocumentConsumer:
             
             logger.info(f"Processing conversion task: task_id={task_id}, file_url={message.file_url}")
             
-            # 处理文档转换
-            questions, document_title, document_description = self._process_document(message)
-            
-            # 发送成功结果（document_title 供试卷名称，document_description 供试卷注意事项）
+            # 处理文档转换（含识别出的年级、学科）
+            questions, document_title, document_description, document_grade, document_subject = self._process_document(message)
+
+            # 发送成功结果（document_title/description 供试卷；document_grade/subject 供试卷与题目）
             result_message = DocumentConvertResultMessage(
                 task_id=task_id,
                 status="completed",
                 result=questions,
                 document_title=document_title or None,
-                document_description=document_description.strip() or None
+                document_description=(document_description or "").strip() or None,
+                document_grade=document_grade if document_grade and 1 <= document_grade <= 9 else None,
+                document_subject=(document_subject or "").strip() or None,
             )
             self._send_result(result_message)
             
@@ -238,10 +240,12 @@ class DocumentConsumer:
         return questions
 
     def _process_document(self, message: DocumentConvertMessage) -> tuple:
-        """处理文档转换。返回 (题目列表, document_title, document_description)。后两者未解析到时为空字符串。"""
+        """处理文档转换。返回 (题目列表, document_title, document_description, document_grade, document_subject)。"""
         file_path = None
         document_title = ""
         document_description = ""
+        document_grade = 0
+        document_subject = ""
         try:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
@@ -249,9 +253,9 @@ class DocumentConsumer:
             # 判断文件格式
             file_ext = os.path.splitext(file_path)[1].lower()
             
-            # Word 文档：解析（返回题目列表 + 图片路径 + 文档标题 + 注意事项，需上传并替换占位符）
+            # Word 文档：解析（返回题目列表 + 图片路径 + 文档标题 + 注意事项 + 年级 + 学科，需上传并替换占位符）
             if file_ext in ['.doc', '.docx']:
-                questions, image_paths, document_title, document_description = self.parser.parse_document(file_path)
+                questions, image_paths, document_title, document_description, document_grade, document_subject = self.parser.parse_document(file_path)
                 if image_paths:
                     try:
                         import asyncio
@@ -280,7 +284,7 @@ class DocumentConsumer:
                             questions = asyncio.run(upload_docx_images())
                     except Exception as e:
                         logger.warning("Docx image upload failed, keeping placeholders: %s", e)
-                return questions, document_title, document_description
+                return questions, document_title, document_description, document_grade, document_subject
             
             # 其他格式：使用MarkItDown转换为Markdown，然后解析
             if not self.markdown_converter:
@@ -360,9 +364,9 @@ class DocumentConsumer:
                     question.images = []
                 question.images.extend(image_urls)
             
-            # 非 Word 格式暂无文档标题与注意事项，使用空字符串
+            # 非 Word 格式暂无文档标题、注意事项与年级学科识别，使用空/0
             doc_title = (metadata.get("title", "").strip() if metadata else "")
-            return questions, doc_title, ""
+            return questions, doc_title, "", 0, ""
             
         finally:
             # 清理临时文件

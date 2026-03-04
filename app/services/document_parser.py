@@ -47,6 +47,21 @@ SECTION_RELAXED_PATTERN = re.compile(
 # 大题标题最大长度（超过则视为正文段落，避免误判）
 SECTION_TITLE_MAX_LEN = 80
 
+# 年级识别：从文档标题或前文匹配，映射为 1-9（与 question-hub-service 一致）。先匹配初中再小学，避免「初一」被拆成「一」
+GRADE_PATTERNS = [
+    (re.compile(r"初一|七年级|初中一"), 7),
+    (re.compile(r"初二|八年级|初中二"), 8),
+    (re.compile(r"初三|九年级|初中三"), 9),
+    (re.compile(r"一年级|小学一"), 1),
+    (re.compile(r"二年级|小学二"), 2),
+    (re.compile(r"三年级|小学三"), 3),
+    (re.compile(r"四年级|小学四"), 4),
+    (re.compile(r"五年级|小学五"), 5),
+    (re.compile(r"六年级|小学六"), 6),
+]
+# 学科识别：常见学科名（取第一个匹配）
+SUBJECT_KEYWORDS = ("数学", "语文", "英语", "物理", "化学", "生物", "历史", "地理", "政治", "道德与法治", "科学")
+
 # 小题多模式拆分：用于将一大题下的整块内容拆成多道小题（按题号/段落等）
 # 顺序：行首（或换行后）出现下列之一即视为新小题开始
 QUESTION_SPLIT_PATTERNS = [
@@ -90,6 +105,38 @@ def _format_suggests_section_heading(
     if fmt.is_bold and fmt.left_indent_pt <= 0 and fmt.first_line_indent_pt <= 0:
         return True
     return False
+
+
+def _parse_grade_subject(document_title: str, full_text: str) -> Tuple[int, str]:
+    """
+    从文档标题及正文前段识别年级、学科。年级映射为 1-9，学科取第一个匹配的关键词。
+    未识别到时 grade 返回 0、subject 返回空字符串，下游可保留题目默认值。
+    """
+    text = ((document_title or "") + "\n" + (full_text or "")[:800]).strip()
+    grade = 0
+    subject = ""
+    for pattern, g in GRADE_PATTERNS:
+        if pattern.search(text):
+            grade = g
+            break
+    for kw in SUBJECT_KEYWORDS:
+        if kw in text:
+            subject = kw
+            break
+    return grade, subject
+
+
+def _apply_grade_subject_to_questions(
+    questions: List[QuestionResult], document_grade: int, document_subject: str
+) -> None:
+    """将识别出的年级、学科回填到题目列表（仅当有效时覆盖）。"""
+    if not questions:
+        return
+    for q in questions:
+        if 1 <= document_grade <= 9:
+            q.grade = document_grade
+        if (document_subject or "").strip():
+            q.subject = document_subject.strip()
 
 
 def _split_section_content_into_questions(block: str) -> List[str]:
@@ -425,17 +472,17 @@ class DocumentParser:
         logger.info(f"File downloaded successfully: {local_path}, size: {file_size} bytes, signature: PK")
         return str(local_path)
     
-    def parse_document(self, file_path: str) -> Tuple[List[QuestionResult], List[str], str, str]:
+    def parse_document(self, file_path: str) -> Tuple[List[QuestionResult], List[str], str, str, int, str]:
         """
-        解析Word文档，提取题目、图片路径、文档标题与注意事项。
+        解析Word文档，提取题目、图片路径、文档标题、注意事项、年级与学科。
 
         Args:
             file_path: 本地文件路径
 
         Returns:
-            (题目列表, 图片本地路径列表, document_title, document_description)。
-            题目 content 中可能含 {{IMAGE_0}}、{{IMAGE_1}} 等占位符，与 image_paths 下标对应；
-            document_description 为文档中「注意事项」区块内容，未解析到则为空字符串。
+            (题目列表, 图片本地路径列表, document_title, document_description, document_grade, document_subject)。
+            题目 content 中可能含 {{IMAGE_0}}、{{IMAGE_1}} 等占位符；document_grade 为 1-9，未识别为 0；
+            document_subject 为学科名（如数学、语文），未识别为空字符串。
         """
         logger.info(f"Parsing document: {file_path}")
 
@@ -493,7 +540,11 @@ class DocumentParser:
                 if structure.document_description:
                     document_description = structure.document_description
                 logger.info("Extracted %s questions from document (structure path)", len(questions))
-                return questions, image_paths, document_title, document_description
+                document_grade, document_subject = _parse_grade_subject(document_title, full_text)
+                _apply_grade_subject_to_questions(questions, document_grade, document_subject)
+                if document_grade or document_subject:
+                    logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
+                return questions, image_paths, document_title, document_description, document_grade, document_subject
 
             # 回退：原正则流程
             reference_answers = self._parse_reference_answers(full_text)
@@ -509,7 +560,11 @@ class DocumentParser:
             if len(questions) == 0 and paragraphs:
                 logger.warning("No questions extracted, but document has content. Check regex patterns.")
                 logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
-            return questions, image_paths, document_title, document_description
+            document_grade, document_subject = _parse_grade_subject(document_title, full_text)
+            _apply_grade_subject_to_questions(questions, document_grade, document_subject)
+            if document_grade or document_subject:
+                logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
+            return questions, image_paths, document_title, document_description, document_grade, document_subject
 
         except Exception as e:
             logger.error("Failed to parse document: %s", e)
