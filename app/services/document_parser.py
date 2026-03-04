@@ -3,6 +3,8 @@
 使用python-docx解析Word文档（.doc, .docx）
 其他格式通过MarkItDown转换为Markdown后解析
 """
+from __future__ import annotations
+
 import os
 import re
 import tempfile
