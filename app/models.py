@@ -18,8 +18,8 @@ class DocumentConvertMessage(BaseModel):
 
 
 class QuestionResult(BaseModel):
-    """题目转换结果"""
-    type: str  # single-choice, multiple-choice, fill-blank, judge, essay
+    """题目转换结果，type 与 question-hub-service 表 question.type 一致"""
+    type: str  # single-choice, multiple-choice, fill-blank, judge, essay（见 document_parser.QUESTION_TYPES）
     content: str
     options: Optional[List[str]] = None
     answer: str
@@ -42,7 +42,9 @@ class DocumentConvertResultMessage(BaseModel):
     error_msg: Optional[str] = Field(default=None, alias="error_msg")
     # 文档内标题，供下游作为试卷名称（优先于文件名）
     document_title: Optional[str] = Field(default=None, alias="document_title")
-    
+    # 文档内「注意事项」区块内容，供下游作为试卷 description；未解析到则为空/不传
+    document_description: Optional[str] = Field(default=None, alias="document_description")
+
     class Config:
         populate_by_name = True
 

@@ -17,6 +17,10 @@ from loguru import logger
 from app.models import QuestionResult
 from app.config import settings
 
+# 试题类型：与 question-hub-service 表 question.type 及前端约定一致，写入库必须为以下之一
+# 对应 README：选择题(单选/多选)、填空题、判断题、解答题
+QUESTION_TYPES = ("single-choice", "multiple-choice", "fill-blank", "judge", "essay")
+
 # 参考答案区块标题的多种写法
 REFERENCE_ANSWER_HEADERS = ("参考答案", "答案", "标准答案")
 
@@ -38,6 +42,29 @@ def _to_markdown_line_breaks(text: str) -> str:
         return text or ""
     # 避免把已经是「两空格+\n」的再重复加空格；将单 \n 转为 "  \n"
     return re.sub(r"(?<!\n)(?<!  )\n(?!\n)", "  \n", text)
+
+
+def _content_has_choice_options(content: str) -> bool:
+    """题干内容是否包含 A. B. [C. D.] 选项形式（视为选择题格式）。"""
+    if not content or len(content) < 4:
+        return False
+    # 至少出现 A. 与 B.（或 A．B．等）
+    option_markers = re.findall(r"[A-D][\.．、]\s*", content)
+    return len(option_markers) >= 2
+
+
+def _parse_stem_and_options_from_choice_content(content: str) -> Tuple[str, List[str]]:
+    """
+    从「题干 + A. xxx B. xxx」形式的 content 中拆出题干与选项列表。
+    按 A/B/C/D 的段落或行边界切分，第一段为题干，其余为选项文本。
+    """
+    if not content:
+        return "", []
+    # 按「行首或换行后紧跟 A. B. C. D.」切分，第一段为题干
+    parts = re.split(r"(?:\n|^)\s*[A-D][\.．、]\s*", content, maxsplit=0)
+    stem = (parts[0].strip() if parts else "").strip()
+    options = [p.strip() for p in parts[1:] if p.strip()]
+    return stem, options
 
 
 class DocumentParser:
@@ -277,16 +304,17 @@ class DocumentParser:
         logger.info(f"File downloaded successfully: {local_path}, size: {file_size} bytes, signature: PK")
         return str(local_path)
     
-    def parse_document(self, file_path: str) -> Tuple[List[QuestionResult], List[str]]:
+    def parse_document(self, file_path: str) -> Tuple[List[QuestionResult], List[str], str, str]:
         """
-        解析Word文档，提取题目与图片路径（图片需由调用方上传并替换占位符）。
+        解析Word文档，提取题目、图片路径、文档标题与注意事项。
 
         Args:
             file_path: 本地文件路径
 
         Returns:
-            (题目列表, 图片本地路径列表)。题目 content 中可能含 {{IMAGE_0}}、{{IMAGE_1}} 等占位符，
-            与 image_paths 下标对应；调用方上传后替换为实际 URL。
+            (题目列表, 图片本地路径列表, document_title, document_description)。
+            题目 content 中可能含 {{IMAGE_0}}、{{IMAGE_1}} 等占位符，与 image_paths 下标对应；
+            document_description 为文档中「注意事项」区块内容，未解析到则为空字符串。
         """
         logger.info(f"Parsing document: {file_path}")
 
@@ -341,12 +369,17 @@ class DocumentParser:
             # 按文档顺序排序、回填参考答案并归属大题
             questions = self._sort_and_fill_answers(questions_with_pos, reference_answers, sections)
 
+            # 解析「注意事项」区块，供下游作为试卷 description；未解析到则为空
+            document_description = self._parse_document_description(full_text)
+            if document_description:
+                logger.info("Extracted document_description (notes) length: %s chars", len(document_description))
+
             logger.info("Extracted %s questions from document", len(questions))
             if len(questions) == 0 and paragraphs:
                 logger.warning("No questions extracted, but document has content. Check regex patterns.")
                 logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
 
-            return questions, image_paths, document_title
+            return questions, image_paths, document_title, document_description
 
         except Exception as e:
             logger.error("Failed to parse document: %s", e)
@@ -495,6 +528,34 @@ class DocumentParser:
             out.append(ans)
         return out
 
+    def _parse_document_description(self, full_text: str) -> str:
+        """
+        从全文中解析「注意事项」区块，作为试卷的 description（注意事项）字段。
+        若未找到「注意事项」或内容为空，返回空字符串；下游未解析到时该字段留空展示。
+        """
+        # 定位「注意事项」或「注意事项：」（允许后跟冒号、空格等）
+        idx = full_text.find("注意事项")
+        if idx == -1:
+            return ""
+        # 跳过标题本身，取标题后的内容（允许「注意事项」或「注意事项：」）
+        block_start = idx + len("注意事项")
+        if block_start < len(full_text) and full_text[block_start] in "：:":
+            block_start += 1
+        block = full_text[block_start:].lstrip("\n\r\t \u3000")
+        if not block:
+            return ""
+        # 截断到下一个区块：大题标题（一. 二. …）、参考答案/答案/标准答案、或文末
+        end_match = SECTION_HEADER_PATTERN.search(block)
+        end_pos = len(block)
+        if end_match:
+            end_pos = min(end_pos, end_match.start())
+        for header in REFERENCE_ANSWER_HEADERS:
+            i = block.find(header)
+            if i != -1 and i < end_pos:
+                end_pos = i
+        description = block[:end_pos].strip()
+        return _to_markdown_line_breaks(description) if description else ""
+
     def _extract_questions_with_positions(
         self, full_text: str, paragraphs: List[str]
     ) -> List[Tuple[QuestionResult, int]]:
@@ -544,7 +605,7 @@ class DocumentParser:
             # 回填答案
             if not (q.answer and q.answer.strip()) and i < len(reference_answers):
                 raw = reference_answers[i].strip()
-                if q.type == "judge":
+                if q.type == QUESTION_TYPES[3]:  # judge
                     if raw in ("对", "正确", "√", "T", "t"):
                         q.answer = "true"
                     elif raw in ("错", "错误", "×", "F", "f"):
@@ -561,6 +622,21 @@ class DocumentParser:
                         section_order, section_title = so, st
                 q.section_order = section_order
                 q.section_title = section_title
+        # 题型与大题标题一致：若小节是「选择题」但被填空提取器误判为 fill-blank（因题干含（ ）），
+        # 且内容含 A. B. 选项，则改为 single-choice 并从 content 拆出题干与 options
+        for q in questions:
+            if q.type != QUESTION_TYPES[2] or not q.section_title or not q.content:  # fill-blank
+                continue
+            if "选择题" not in q.section_title and "单选题" not in q.section_title:
+                continue
+            if not _content_has_choice_options(q.content):
+                continue
+            stem, options = _parse_stem_and_options_from_choice_content(q.content)
+            if len(options) < 2:
+                continue
+            q.type = QUESTION_TYPES[0]  # single-choice
+            q.content = stem
+            q.options = options
         # 将题干/选项/答案/解析中的单换行转为 Markdown 换行，便于前端正确展示
         for q in questions:
             if q.content:
@@ -571,6 +647,11 @@ class DocumentParser:
                 q.explanation = _to_markdown_line_breaks(q.explanation)
             if q.options:
                 q.options = [_to_markdown_line_breaks(o) for o in q.options]
+        # 保证题型与系统定义一致，避免写入 question 表时出现非法 type
+        for q in questions:
+            if q.type not in QUESTION_TYPES:
+                logger.warning("Question type %r not in QUESTION_TYPES, fallback to fill-blank", q.type)
+                q.type = QUESTION_TYPES[2]  # fill-blank
         return questions
     
     def _extract_single_choice_with_pos(self, text: str, paragraphs: List[str]) -> List[Tuple[QuestionResult, int]]:
