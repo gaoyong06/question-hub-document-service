@@ -530,6 +530,7 @@ class DocumentParser:
             structure = self._parse_structure(paragraphs, format_infos)
             total_from_structure = sum(len(contents) for _, _, contents in structure.sections)
             if total_from_structure > 0:
+                document_description = ""
                 answer_block_text = ""
                 if structure.answer_block_para_start is not None:
                     answer_block_text = "\n".join(paragraphs[structure.answer_block_para_start:])
