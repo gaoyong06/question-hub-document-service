@@ -48,6 +48,8 @@ class DocumentConvertResultMessage(BaseModel):
     document_grade: Optional[int] = Field(default=None, alias="document_grade")
     # 识别出的学科（如数学、语文），未识别为空或不传
     document_subject: Optional[str] = Field(default=None, alias="document_subject")
+    # MarkItDown 转换后的 markdown 原文（含 Word 也经 MarkItDown 转一份），存入 conversion_task 便于与 python-docx 效果对比
+    markdown_content: Optional[str] = Field(default=None, alias="markdown_content")
 
     class Config:
         populate_by_name = True

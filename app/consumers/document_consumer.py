@@ -169,10 +169,10 @@ class DocumentConsumer:
             
             logger.info(f"Processing conversion task: task_id={task_id}, file_url={message.file_url}")
             
-            # 处理文档转换（含识别出的年级、学科）
-            questions, document_title, document_description, document_grade, document_subject = self._process_document(message)
+            # 处理文档转换（含识别出的年级、学科；markdown_content 为 MarkItDown 转换结果，供持久化与对比）
+            questions, document_title, document_description, document_grade, document_subject, markdown_content = self._process_document(message)
 
-            # 发送成功结果（document_title/description 供试卷；document_grade/subject 供试卷与题目）
+            # 发送成功结果（document_title/description 供试卷；document_grade/subject 供试卷与题目；markdown_content 存入 conversion_task）
             result_message = DocumentConvertResultMessage(
                 task_id=task_id,
                 status="completed",
@@ -181,6 +181,7 @@ class DocumentConsumer:
                 document_description=(document_description or "").strip() or None,
                 document_grade=document_grade if document_grade and 1 <= document_grade <= 9 else None,
                 document_subject=(document_subject or "").strip() or None,
+                markdown_content=(markdown_content or "").strip() or None,
             )
             self._send_result(result_message)
             
@@ -240,12 +241,14 @@ class DocumentConsumer:
         return questions
 
     def _process_document(self, message: DocumentConvertMessage) -> tuple:
-        """处理文档转换。返回 (题目列表, document_title, document_description, document_grade, document_subject)。"""
+        """处理文档转换。返回 (题目列表, document_title, document_description, document_grade, document_subject, markdown_content)。
+        markdown_content 为 MarkItDown 转换后的原文（仅当已转换时非空），用于与 python-docx 效果对比与持久化。"""
         file_path = None
         document_title = ""
         document_description = ""
         document_grade = 0
         document_subject = ""
+        markdown_content = ""
         try:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
@@ -253,9 +256,15 @@ class DocumentConsumer:
             # 判断文件格式
             file_ext = os.path.splitext(file_path)[1].lower()
             
-            # Word 文档：解析（返回题目列表 + 图片路径 + 文档标题 + 注意事项 + 年级 + 学科，需上传并替换占位符）
+            # Word 文档：先用 python-docx 解析（保持现有产品逻辑）；同时用 MarkItDown 转一份 markdown 存下来便于对比
             if file_ext in ['.doc', '.docx']:
                 questions, image_paths, document_title, document_description, document_grade, document_subject = self.parser.parse_document(file_path)
+                # Word 也经 MarkItDown 转一份 markdown 保存，便于与 python-docx 解析效果对比
+                if self.markdown_converter and self.markdown_converter.is_supported_format(file_path):
+                    try:
+                        markdown_content, _ = self.markdown_converter.convert_to_markdown(file_path)
+                    except Exception as e:
+                        logger.warning("MarkItDown conversion for Word failed (docx parse unchanged): %s", e)
                 if image_paths:
                     try:
                         import asyncio
@@ -284,8 +293,8 @@ class DocumentConsumer:
                             questions = asyncio.run(upload_docx_images())
                     except Exception as e:
                         logger.warning("Docx image upload failed, keeping placeholders: %s", e)
-                return questions, document_title, document_description, document_grade, document_subject
-            
+                return questions, document_title, document_description, document_grade, document_subject, markdown_content or ""
+
             # 其他格式：使用MarkItDown转换为Markdown，然后解析
             if not self.markdown_converter:
                 raise RuntimeError("MarkItDown is not available. Cannot process non-Word formats.")
@@ -364,10 +373,10 @@ class DocumentConsumer:
                     question.images = []
                 question.images.extend(image_urls)
             
-            # 非 Word 格式暂无文档标题、注意事项与年级学科识别，使用空/0
+            # 非 Word 格式暂无文档标题、注意事项与年级学科识别，使用空/0；markdown 为 MarkItDown 原始输出
             doc_title = (metadata.get("title", "").strip() if metadata else "")
-            return questions, doc_title, "", 0, ""
-            
+            return questions, doc_title, "", 0, "", markdown_content or ""
+
         finally:
             # 清理临时文件
             if file_path:
