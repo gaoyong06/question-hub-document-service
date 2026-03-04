@@ -253,71 +253,26 @@ class DocumentConsumer:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
             
-            # 判断文件格式
+            # 统一流程：所有格式 → MarkItDown → 图片上传替换 → Markdown 流式解析
             file_ext = os.path.splitext(file_path)[1].lower()
-            
-            # Word 文档：先用 python-docx 解析（保持现有产品逻辑）；同时用 MarkItDown 转一份 markdown 存下来便于对比
-            if file_ext in ['.doc', '.docx']:
-                questions, image_paths, document_title, document_description, document_grade, document_subject = self.parser.parse_document(file_path)
-                # Word 也经 MarkItDown 转一份 markdown 保存，便于与 python-docx 解析效果对比
-                if self.markdown_converter and self.markdown_converter.is_supported_format(file_path):
-                    try:
-                        markdown_content, _ = self.markdown_converter.convert_to_markdown(file_path)
-                    except Exception as e:
-                        logger.warning("MarkItDown conversion for Word failed (docx parse unchanged): %s", e)
-                if image_paths:
-                    try:
-                        import asyncio
-                        async def upload_docx_images():
-                            return await self._upload_docx_images_and_replace_placeholders(
-                                questions, image_paths, business_type="question_image"
-                            )
-                        try:
-                            loop = asyncio.get_event_loop()
-                            if loop.is_running():
-                                import concurrent.futures
-                                import threading
-                                box = {}
-                                def run():
-                                    new_loop = asyncio.new_event_loop()
-                                    asyncio.set_event_loop(new_loop)
-                                    box['result'] = new_loop.run_until_complete(upload_docx_images())
-                                    new_loop.close()
-                                t = threading.Thread(target=run)
-                                t.start()
-                                t.join()
-                                questions = box['result']
-                            else:
-                                questions = loop.run_until_complete(upload_docx_images())
-                        except RuntimeError:
-                            questions = asyncio.run(upload_docx_images())
-                    except Exception as e:
-                        logger.warning("Docx image upload failed, keeping placeholders: %s", e)
-                return questions, document_title, document_description, document_grade, document_subject, markdown_content or ""
-
-            # 其他格式：使用MarkItDown转换为Markdown，然后解析
             if not self.markdown_converter:
-                raise RuntimeError("MarkItDown is not available. Cannot process non-Word formats.")
-            
+                raise RuntimeError("MarkItDown is not available.")
             if not self.markdown_converter.is_supported_format(file_path):
                 raise ValueError(f"Unsupported file format: {file_ext}")
-            
-            # 转换为Markdown
+
+            # 1. 转为 Markdown（含 .doc/.docx）
             markdown_content, metadata = self.markdown_converter.convert_to_markdown(file_path)
-            
-            # 处理图片：提取、上传、替换路径
+
+            # 2. 图片：data URL / 本地 / 网络 → 上传 asset-service，在 markdown 中替换为 URL
             import asyncio
             try:
-                # 尝试获取现有的事件循环
                 try:
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
-                        # 如果事件循环正在运行，创建新的事件循环在另一个线程中运行
-                        import concurrent.futures
                         import threading
                         result_container = {}
                         exception_container = {}
-                        
+
                         def run_in_thread():
                             try:
                                 new_loop = asyncio.new_event_loop()
@@ -326,56 +281,54 @@ class DocumentConsumer:
                                     self.image_processor.process_images_in_markdown(
                                         markdown_content,
                                         document_base_path=os.path.dirname(file_path),
-                                        business_type="question_image"
+                                        business_type="question_image",
                                     )
                                 )
-                                result_container['result'] = result
+                                result_container["result"] = result
                                 new_loop.close()
                             except Exception as e:
-                                exception_container['exception'] = e
-                        
-                        thread = threading.Thread(target=run_in_thread)
-                        thread.start()
-                        thread.join()
-                        
-                        if 'exception' in exception_container:
-                            raise exception_container['exception']
-                        processed_markdown, image_urls = result_container['result']
+                                exception_container["exception"] = e
+
+                        t = threading.Thread(target=run_in_thread)
+                        t.start()
+                        t.join()
+                        if "exception" in exception_container:
+                            raise exception_container["exception"]
+                        processed_markdown, _ = result_container["result"]
                     else:
-                        processed_markdown, image_urls = loop.run_until_complete(
+                        processed_markdown, _ = loop.run_until_complete(
                             self.image_processor.process_images_in_markdown(
                                 markdown_content,
                                 document_base_path=os.path.dirname(file_path),
-                                business_type="question_image"
+                                business_type="question_image",
                             )
                         )
                 except RuntimeError:
-                    # 没有事件循环，创建新的
-                    processed_markdown, image_urls = asyncio.run(
+                    processed_markdown, _ = asyncio.run(
                         self.image_processor.process_images_in_markdown(
                             markdown_content,
                             document_base_path=os.path.dirname(file_path),
-                            business_type="question_image"
+                            business_type="question_image",
                         )
                     )
             except Exception as e:
-                logger.warning(f"Failed to process images, continuing without image processing: {e}")
-                # 如果图片处理失败，继续使用原始Markdown
+                logger.warning("Failed to process images, continuing with raw markdown: %s", e)
                 processed_markdown = markdown_content
-                image_urls = []
-            
-            # 从Markdown解析题目
-            questions = self.markdown_parser.parse_markdown_to_questions(processed_markdown)
-            
-            # 将图片URL添加到题目中
-            for question in questions:
-                if not question.images:
-                    question.images = []
-                question.images.extend(image_urls)
-            
-            # 非 Word 格式暂无文档标题、注意事项与年级学科识别，使用空/0；markdown 为 MarkItDown 原始输出
-            doc_title = (metadata.get("title", "").strip() if metadata else "")
-            return questions, doc_title, "", 0, "", markdown_content or ""
+
+            # 3. Markdown 流式解析为试卷（标题、注意事项、大题、小题、参考答案任意位置）
+            questions, document_title, document_description, document_grade, document_subject = (
+                self.markdown_parser.parse_markdown_to_exam(processed_markdown)
+            )
+            if not document_title and metadata:
+                document_title = (metadata.get("title", "") or "").strip()
+            return (
+                questions,
+                document_title or "",
+                document_description or "",
+                document_grade,
+                document_subject or "",
+                markdown_content or "",
+            )
 
         finally:
             # 清理临时文件

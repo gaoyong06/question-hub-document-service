@@ -19,71 +19,34 @@ from loguru import logger
 
 from app.models import QuestionResult
 from app.config import settings
-
-# 试题类型：与 question-hub-service 表 question.type 及前端约定一致，写入库必须为以下之一
-# 对应 README：选择题(单选/多选)、填空题、判断题、解答题
-QUESTION_TYPES = ("single-choice", "multiple-choice", "fill-blank", "judge", "essay")
-
-# 参考答案区块标题的多种写法
-REFERENCE_ANSWER_HEADERS = ("参考答案", "答案", "标准答案")
-
-# 大题标题模式：一.选择题(共6题，共12分)、二.判断题、六.解答题 等（整行）
-SECTION_HEADER_PATTERN = re.compile(
-    r"^([一二三四五六七八九十]+)[\.．、]\s*(.+)$",
-    re.MULTILINE,
+from app.services.exam_structure_utils import (
+    QUESTION_TYPES,
+    REFERENCE_ANSWER_HEADERS,
+    SECTION_HEADER_PATTERN,
+    QUESTION_START_PATTERN,
+    SECTION_RELAXED_PATTERN,
+    SECTION_TITLE_MAX_LEN,
+    QUESTION_SPLIT_PATTERNS,
+    GRADE_PATTERNS,
+    SUBJECT_KEYWORDS,
+    ParsedStructure,
+    parse_structure as parse_structure_common,
+    structure_to_questions as structure_to_questions_common,
+    parse_reference_answers as parse_reference_answers_common,
+    content_has_choice_options as content_has_choice_options_common,
+    parse_stem_and_options_from_choice_content as parse_stem_and_options_from_choice_content_common,
+    to_markdown_line_breaks as to_markdown_line_breaks_common,
+    parse_grade_subject as parse_grade_subject_common,
+    apply_grade_subject_to_questions as apply_grade_subject_to_questions_common,
+    is_relaxed_section_heading as is_relaxed_section_heading_common,
 )
-# 答案/题干截断边界：下一小题题号（数字.）或换行后跟大题标题（一. 二. …）或文末。用于正则中避免把下一大题标题吃进本题
+
+# 答案/题干截断边界（fallback 正则用）
 ANSWER_END_LOOKAHEAD = r"(?=\d+[\.．、]|\n\s*[一二三四五六七八九十]+[\.．、]|\Z)"
-
-# 小题题号：段落以数字+点/顿号开头，表示新一题（强匹配，流式时用）
-QUESTION_START_PATTERN = re.compile(r"^\d+[\.．、]\s*", re.MULTILINE)
-
-# 宽松大题：无「一. 二.」时，以题型词或「第X部分/节」开头的短行视为大题标题
-SECTION_RELAXED_KEYWORDS = (
-    "选择题", "单选题", "多选题", "填空题", "判断题", "解答题", "计算题", "作图题",
-    "第一部分", "第一节", "第二部分", "第二节", "第三部分", "第三节", "第四节", "第五节",
-)
-SECTION_RELAXED_PATTERN = re.compile(
-    r"^(?:第[一二三四五六七八九十\d]+[部分节]\s*)?(?:选择题|单选题|多选题|填空题|判断题|解答题|计算题|作图题).*$"
-)
-# 大题标题最大长度（超过则视为正文段落，避免误判）
-SECTION_TITLE_MAX_LEN = 80
-
-# 年级识别：从文档标题或前文匹配，映射为 1-9（与 question-hub-service 一致）。先匹配初中再小学，避免「初一」被拆成「一」
-GRADE_PATTERNS = [
-    (re.compile(r"初一|七年级|初中一"), 7),
-    (re.compile(r"初二|八年级|初中二"), 8),
-    (re.compile(r"初三|九年级|初中三"), 9),
-    (re.compile(r"一年级|小学一"), 1),
-    (re.compile(r"二年级|小学二"), 2),
-    (re.compile(r"三年级|小学三"), 3),
-    (re.compile(r"四年级|小学四"), 4),
-    (re.compile(r"五年级|小学五"), 5),
-    (re.compile(r"六年级|小学六"), 6),
-]
-# 学科识别：常见学科名（取第一个匹配）
-SUBJECT_KEYWORDS = ("数学", "语文", "英语", "物理", "化学", "生物", "历史", "地理", "政治", "道德与法治", "科学")
-
-# 小题多模式拆分：用于将一大题下的整块内容拆成多道小题（按题号/段落等）
-# 顺序：行首（或换行后）出现下列之一即视为新小题开始
-QUESTION_SPLIT_PATTERNS = [
-    re.compile(r"(?:^|\n)\s*(?=\d+[\.．、]\s)", re.MULTILINE),   # 1. 2. 3.
-    re.compile(r"(?:^|\n)\s*(?=[a-dA-D][\.．、]\s)", re.MULTILINE),  # a. b. c. d.
-    re.compile(r"(?:^|\n)\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])", re.MULTILINE),   # ①②③
-    re.compile(r"(?:^|\n)\s*(?=\(\d+\)\s)", re.MULTILINE),          # (1) (2)
-]
 
 
 def _is_relaxed_section_heading(line: str) -> bool:
-    """宽松判断：该行是否像大题标题（无「一. 二.」时用）。"""
-    p = (line or "").strip()
-    if not p or len(p) > SECTION_TITLE_MAX_LEN:
-        return False
-    if SECTION_HEADER_PATTERN.match(p):
-        return True
-    if SECTION_RELAXED_PATTERN.match(p):
-        return True
-    return any(k in p for k in SECTION_RELAXED_KEYWORDS) and len(p) <= SECTION_TITLE_MAX_LEN
+    return is_relaxed_section_heading_common(line)
 
 
 # 格式辅助：正文默认字号（pt），用于判断「明显大于正文」的标题
@@ -109,63 +72,6 @@ def _format_suggests_section_heading(
     return False
 
 
-def _parse_grade_subject(document_title: str, full_text: str) -> Tuple[int, str]:
-    """
-    从文档标题及正文前段识别年级、学科。年级映射为 1-9，学科取第一个匹配的关键词。
-    未识别到时 grade 返回 0、subject 返回空字符串，下游可保留题目默认值。
-    """
-    text = ((document_title or "") + "\n" + (full_text or "")[:800]).strip()
-    grade = 0
-    subject = ""
-    for pattern, g in GRADE_PATTERNS:
-        if pattern.search(text):
-            grade = g
-            break
-    for kw in SUBJECT_KEYWORDS:
-        if kw in text:
-            subject = kw
-            break
-    return grade, subject
-
-
-def _apply_grade_subject_to_questions(
-    questions: List[QuestionResult], document_grade: int, document_subject: str
-) -> None:
-    """将识别出的年级、学科回填到题目列表（仅当有效时覆盖）。"""
-    if not questions:
-        return
-    for q in questions:
-        if 1 <= document_grade <= 9:
-            q.grade = document_grade
-        if (document_subject or "").strip():
-            q.subject = document_subject.strip()
-
-
-def _split_section_content_into_questions(block: str) -> List[str]:
-    """
-    将一大题下的整块文本拆成多道小题。多模式：先按题号形式（1. / a. / ①② / (1)）拆，
-    若无则按双换行、再按单换行拆；若仍只有一段则整块作为一题。
-    """
-    block = (block or "").strip()
-    if not block:
-        return []
-    for pattern in QUESTION_SPLIT_PATTERNS:
-        parts = pattern.split(block)
-        parts = [p.strip() for p in parts if p.strip()]
-        if len(parts) >= 2:
-            return parts
-    # 按双换行拆成多段
-    parts = re.split(r"\n\s*\n", block)
-    parts = [p.strip() for p in parts if p.strip()]
-    if len(parts) >= 2:
-        return parts
-    # 按单换行拆（每段一题）
-    parts = [p.strip() for p in block.split("\n") if p.strip()]
-    if len(parts) >= 2:
-        return parts
-    return [block]
-
-
 @dataclass
 class ParagraphFormatInfo:
     """Word 段落格式信息，用于辅助判断大题/小题（结构优先）。无格式时为 None。"""
@@ -174,67 +80,6 @@ class ParagraphFormatInfo:
     left_indent_pt: float = 0.0
     first_line_indent_pt: float = 0.0
     is_bold: bool = False
-
-
-@dataclass
-class ParsedStructure:
-    """流式解析得到的试卷结构，再映射为业务题目与元数据。"""
-    document_title: str = ""
-    document_description: str = ""
-    # 每个元素：(section_order, section_title, 该大题下各小题的 content 列表)
-    sections: List[Tuple[int, str, List[str]]] = field(default_factory=list)
-    # 参考答案区块的起始段落下标，用于从 paragraphs 截取答案区文本
-    answer_block_para_start: Optional[int] = None
-
-
-def _section_title_to_question_type(section_title: str) -> str:
-    """根据大题标题映射为系统题型（与 question 表 type 一致）。"""
-    if not section_title:
-        return QUESTION_TYPES[2]  # fill-blank 兜底
-    if "选择题" in section_title or "单选题" in section_title:
-        return QUESTION_TYPES[0]  # single-choice
-    if "多选题" in section_title:
-        return QUESTION_TYPES[1]  # multiple-choice
-    if "判断题" in section_title:
-        return QUESTION_TYPES[3]  # judge
-    if "解答题" in section_title:
-        return QUESTION_TYPES[4]  # essay
-    # 填空题、计算题、作图题等
-    return QUESTION_TYPES[2]  # fill-blank
-
-
-def _to_markdown_line_breaks(text: str) -> str:
-    """
-    将纯文本中的单换行转为 Markdown 行尾换行（两空格+换行），
-    便于前端 react-markdown 正确显示段内换行；已有双换行或「两空格+换行」则保持。
-    """
-    if not text or "\n" not in text:
-        return text or ""
-    # 避免把已经是「两空格+\n」的再重复加空格；将单 \n 转为 "  \n"
-    return re.sub(r"(?<!\n)(?<!  )\n(?!\n)", "  \n", text)
-
-
-def _content_has_choice_options(content: str) -> bool:
-    """题干内容是否包含 A. B. [C. D.] 选项形式（视为选择题格式）。"""
-    if not content or len(content) < 4:
-        return False
-    # 至少出现 A. 与 B.（或 A．B．等）
-    option_markers = re.findall(r"[A-D][\.．、]\s*", content)
-    return len(option_markers) >= 2
-
-
-def _parse_stem_and_options_from_choice_content(content: str) -> Tuple[str, List[str]]:
-    """
-    从「题干 + A. xxx B. xxx」形式的 content 中拆出题干与选项列表。
-    按 A/B/C/D 的段落或行边界切分，第一段为题干，其余为选项文本。
-    """
-    if not content:
-        return "", []
-    # 按「行首或换行后紧跟 A. B. C. D.」切分，第一段为题干
-    parts = re.split(r"(?:\n|^)\s*[A-D][\.．、]\s*", content, maxsplit=0)
-    stem = (parts[0].strip() if parts else "").strip()
-    options = [p.strip() for p in parts[1:] if p.strip()]
-    return stem, options
 
 
 class DocumentParser:
@@ -531,20 +376,18 @@ class DocumentParser:
             total_from_structure = sum(len(contents) for _, _, contents in structure.sections)
             if total_from_structure > 0:
                 document_description = ""
-                answer_block_text = ""
-                if structure.answer_block_para_start is not None:
-                    answer_block_text = "\n".join(paragraphs[structure.answer_block_para_start:])
+                answer_block_text = "\n".join(structure.answer_block_texts) if structure.answer_block_texts else ""
                 reference_answers = self._parse_reference_answers(answer_block_text) if answer_block_text else []
                 logger.info("Structure path: sections=%s, questions=%s, reference_answers=%s",
                             len(structure.sections), total_from_structure, len(reference_answers))
-                questions = self._structure_to_questions(structure, paragraphs, reference_answers)
+                questions = structure_to_questions_common(structure, reference_answers)
                 if structure.document_title:
                     document_title = structure.document_title
                 if structure.document_description:
                     document_description = structure.document_description
                 logger.info("Extracted %s questions from document (structure path)", len(questions))
-                document_grade, document_subject = _parse_grade_subject(document_title, full_text)
-                _apply_grade_subject_to_questions(questions, document_grade, document_subject)
+                document_grade, document_subject = parse_grade_subject_common(document_title, full_text)
+                apply_grade_subject_to_questions_common(questions, document_grade, document_subject)
                 if document_grade or document_subject:
                     logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
                 return questions, image_paths, document_title, document_description, document_grade, document_subject
@@ -563,8 +406,8 @@ class DocumentParser:
             if len(questions) == 0 and paragraphs:
                 logger.warning("No questions extracted, but document has content. Check regex patterns.")
                 logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
-            document_grade, document_subject = _parse_grade_subject(document_title, full_text)
-            _apply_grade_subject_to_questions(questions, document_grade, document_subject)
+            document_grade, document_subject = parse_grade_subject_common(document_title, full_text)
+            apply_grade_subject_to_questions_common(questions, document_grade, document_subject)
             if document_grade or document_subject:
                 logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
             return questions, image_paths, document_title, document_description, document_grade, document_subject
@@ -702,46 +545,8 @@ class DocumentParser:
         return paragraphs, image_paths, format_infos
 
     def _parse_reference_answers(self, full_text: str) -> List[str]:
-        """
-        从全文中的「参考答案」区块解析出按题号顺序的答案列表。
-        支持格式：参考答案 1. A  2. B  3. 对  … 或 1．A  2．B 等。
-        """
-        out: List[str] = []
-        # 定位「参考答案」区块：优先「参考答案」，其次「标准答案」，最后「答案」（避免误匹配题干中的「答案」）
-        idx = full_text.find("参考答案")
-        if idx == -1:
-            idx = full_text.find("标准答案")
-        if idx == -1:
-            idx = full_text.find("答案")
-        if idx == -1:
-            return out
-        header = "参考答案" if full_text.find("参考答案") == idx else ("标准答案" if full_text.find("标准答案") == idx else "答案")
-
-        block = full_text[idx:]
-        # 去掉首行仅含标题的情况（若首行还有题号答案则保留）
-        first_nl = block.find("\n")
-        if first_nl != -1:
-            first_line = block[:first_nl]
-            # 首行去掉「参考答案」等字样后若只剩空白，则从下一行开始解析
-            rest_first = first_line.replace(header, "").strip()
-            if not rest_first or not re.search(r"\d+[\.．、]", rest_first):
-                block = block[first_nl + 1:]
-            # 否则 block 保持从 idx 开始（含首行「参考答案 1.A 2.B」）
-        else:
-            block = re.sub(r"^[\s\S]*?" + re.escape(header), "", block, count=1).strip()
-
-        # 按「数字.」或「数字．」分割出每题答案
-        pattern = re.compile(r"\d+[\.．、]\s*")
-        parts = pattern.split(block)
-        for i, seg in enumerate(parts):
-            ans = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", seg)
-            if not ans:
-                continue
-            # 跳过明显是大题标题的行（如「一.选择题」「二.判断题」），避免混入答案列表
-            if SECTION_HEADER_PATTERN.match(ans) or re.match(r"^[一二三四五六七八九十]+[\.．、]\s*[选判填计作解].*$", ans):
-                continue
-            out.append(ans)
-        return out
+        """从「参考答案」区块解析出按题号顺序的答案列表（委托公共实现）。"""
+        return parse_reference_answers_common(full_text)
 
     def _parse_document_description(self, full_text: str) -> str:
         """
@@ -769,7 +574,7 @@ class DocumentParser:
             if i != -1 and i < end_pos:
                 end_pos = i
         description = block[:end_pos].strip()
-        return _to_markdown_line_breaks(description) if description else ""
+        return to_markdown_line_breaks_common(description) if description else ""
 
     def _parse_structure(
         self,
@@ -777,21 +582,8 @@ class DocumentParser:
         paragraph_formats: Optional[List[ParagraphFormatInfo]] = None,
     ) -> ParsedStructure:
         """
-        流式解析试卷结构：从上到下逐段识别 试卷标题 / 注意事项 / 大题 / 小题 / 参考答案。
-        大题：强匹配「一. 二.」或宽松匹配题型词/「第X部分、节」等；有格式时可用样式/字号/缩进/加粗辅助。
-        小题：整块收集后再按多模式拆分（1. a. ①② (1)、双换行、单换行）。
+        流式解析试卷结构（委托公共实现，传入 Word 段落格式辅助大题判断）。
         """
-        order_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
-        next_order = 11
-        implicit_section_order = 1
-        structure = ParsedStructure()
-        current_section: Optional[Tuple[int, str]] = None
-        current_question_lines: List[str] = []
-        title_done = False
-        in_notes = False
-        notes_lines: List[str] = []
-
-        # 正文代表字号（用于格式判断「明显大于正文」的标题）；有格式列表时取中位数
         body_font_pt = DEFAULT_BODY_FONT_PT
         if paragraph_formats and len(paragraph_formats) == len(paragraphs):
             sizes = [f.font_size_pt for f in paragraph_formats if f and getattr(f, "font_size_pt", None) is not None]
@@ -799,100 +591,11 @@ class DocumentParser:
                 sorted_sizes = sorted(sizes)
                 body_font_pt = sorted_sizes[len(sorted_sizes) // 2]
 
-        def flush_section() -> None:
-            """将当前大题下的整块内容按多模式拆成小题，追加到 structure.sections。"""
-            nonlocal current_section, current_question_lines
-            if not current_section:
-                return
-            block = "\n".join(current_question_lines).strip()
-            section_questions = _split_section_content_into_questions(block) if block else []
-            structure.sections.append((current_section[0], current_section[1], section_questions))
-            current_section = None
-            current_question_lines = []
-
-        for i, para in enumerate(paragraphs):
-            p = (para or "").strip()
+        def format_suggests_heading(i: int) -> bool:
             fmt = paragraph_formats[i] if paragraph_formats and i < len(paragraph_formats) else None
-            if not p:
-                if current_section and current_question_lines:
-                    current_question_lines.append("")
-                elif in_notes:
-                    notes_lines.append("")
-                continue
+            return _format_suggests_section_heading(fmt, body_font_pt)
 
-            # 1. 参考答案区块
-            if any(h in p for h in REFERENCE_ANSWER_HEADERS) and (
-                p.startswith("参考答案") or p.startswith("标准答案") or (p.startswith("答案") and len(p) <= 10)
-            ):
-                flush_section()
-                structure.answer_block_para_start = i
-                break
-
-            # 2. 注意事项（仅当段落以「注意事项」开头时进入）
-            if p.startswith("注意事项"):
-                in_notes = True
-                start = len("注意事项")
-                if start < len(p) and p[start] in "：:":
-                    start += 1
-                rest = p[start:].strip()
-                if rest:
-                    notes_lines.append(rest)
-                continue
-            if in_notes:
-                if (
-                    SECTION_HEADER_PATTERN.match(p)
-                    or _is_relaxed_section_heading(p)
-                    or _format_suggests_section_heading(fmt, body_font_pt)
-                ):
-                    in_notes = False
-                    structure.document_description = _to_markdown_line_breaks("\n".join(notes_lines).strip())
-                    notes_lines = []
-                else:
-                    notes_lines.append(p)
-                    continue
-
-            # 3. 大题标题：强匹配「一. 二.」或宽松匹配（题型词、第X部分/节等），或格式像标题
-            section_match = SECTION_HEADER_PATTERN.match(p)
-            if section_match:
-                flush_section()
-                cn_num, rest = section_match.group(1), section_match.group(2).strip()
-                order = order_map.get(cn_num)
-                if order is None:
-                    order = next_order
-                    next_order += 1
-                title = (cn_num + "." + rest) if not rest.startswith(".") else (cn_num + rest)
-                current_section = (order, title)
-                current_question_lines = []
-                continue
-            if _is_relaxed_section_heading(p) or _format_suggests_section_heading(fmt, body_font_pt):
-                flush_section()
-                current_section = (implicit_section_order, p)
-                implicit_section_order += 1
-                current_question_lines = []
-                continue
-
-            # 4. 无大题时的题号行：仅作试卷标题候选
-            if QUESTION_START_PATTERN.match(p) and not current_section:
-                if not title_done and not structure.document_title:
-                    structure.document_title = p[:200].strip()
-                    title_done = True
-                continue
-
-            # 5. 归属当前大题或标题/注意事项
-            if current_section:
-                current_question_lines.append(p)
-            elif not title_done and not in_notes:
-                if not structure.document_title:
-                    structure.document_title = p[:200].strip()
-                title_done = True
-            elif in_notes:
-                notes_lines.append(p)
-
-        if in_notes and notes_lines:
-            structure.document_description = _to_markdown_line_breaks("\n".join(notes_lines).strip())
-        flush_section()
-
-        return structure
+        return parse_structure_common(paragraphs, format_suggests_heading)
 
     def _structure_to_questions(
         self,
@@ -900,57 +603,8 @@ class DocumentParser:
         paragraphs: List[str],
         reference_answers: List[str],
     ) -> List[QuestionResult]:
-        """将解析出的结构映射为业务题目列表：小题题型由所属大题决定，答案按参考答案顺序回填。"""
-        questions: List[QuestionResult] = []
-        for section_order, section_title, contents in structure.sections:
-            q_type = _section_title_to_question_type(section_title)
-            for content in contents:
-                if not content or not content.strip():
-                    continue
-                content = content.strip()
-                options: Optional[List[str]] = None
-                stem = content
-                if q_type in (QUESTION_TYPES[0], QUESTION_TYPES[1]) and _content_has_choice_options(content):
-                    stem, opts = _parse_stem_and_options_from_choice_content(content)
-                    if len(opts) >= 2:
-                        options = opts
-                q = QuestionResult(
-                    type=q_type,
-                    content=stem,
-                    options=options,
-                    answer="",
-                    difficulty="medium",
-                    grade=1,
-                    subject="",
-                    section_order=section_order,
-                    section_title=section_title,
-                )
-                questions.append(q)
-
-        # 回填参考答案（按全局题序）
-        for i, q in enumerate(questions):
-            if not (q.answer and q.answer.strip()) and i < len(reference_answers):
-                raw = reference_answers[i].strip()
-                if q.type == QUESTION_TYPES[3]:  # judge
-                    q.answer = "true" if raw in ("对", "正确", "√", "T", "t") else ("false" if raw in ("错", "错误", "×", "F", "f") else raw)
-                else:
-                    q.answer = raw
-
-        # Markdown 换行
-        for q in questions:
-            if q.content:
-                q.content = _to_markdown_line_breaks(q.content)
-            if q.answer:
-                q.answer = _to_markdown_line_breaks(q.answer)
-            if q.options:
-                q.options = [_to_markdown_line_breaks(o) for o in q.options]
-
-        # 题型合法性兜底
-        for q in questions:
-            if q.type not in QUESTION_TYPES:
-                logger.warning("Question type %r not in QUESTION_TYPES, fallback to fill-blank", q.type)
-                q.type = QUESTION_TYPES[2]
-        return questions
+        """将解析出的结构映射为业务题目列表（委托公共实现）。"""
+        return structure_to_questions_common(structure, reference_answers)
 
     def _extract_questions_with_positions(
         self, full_text: str, paragraphs: List[str]
@@ -1039,9 +693,9 @@ class DocumentParser:
                 continue
             if "选择题" not in q.section_title and "单选题" not in q.section_title:
                 continue
-            if not _content_has_choice_options(q.content):
+            if not content_has_choice_options_common(q.content):
                 continue
-            stem, options = _parse_stem_and_options_from_choice_content(q.content)
+            stem, options = parse_stem_and_options_from_choice_content_common(q.content)
             if len(options) < 2:
                 continue
             q.type = QUESTION_TYPES[0]  # single-choice
@@ -1050,13 +704,13 @@ class DocumentParser:
         # 将题干/选项/答案/解析中的单换行转为 Markdown 换行，便于前端正确展示
         for q in questions:
             if q.content:
-                q.content = _to_markdown_line_breaks(q.content)
+                q.content = to_markdown_line_breaks_common(q.content)
             if q.answer:
-                q.answer = _to_markdown_line_breaks(q.answer)
+                q.answer = to_markdown_line_breaks_common(q.answer)
             if q.explanation:
-                q.explanation = _to_markdown_line_breaks(q.explanation)
+                q.explanation = to_markdown_line_breaks_common(q.explanation)
             if q.options:
-                q.options = [_to_markdown_line_breaks(o) for o in q.options]
+                q.options = [to_markdown_line_breaks_common(o) for o in q.options]
         # 保证题型与系统定义一致，避免写入 question 表时出现非法 type
         for q in questions:
             if q.type not in QUESTION_TYPES:

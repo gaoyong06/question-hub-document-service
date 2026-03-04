@@ -1,17 +1,94 @@
 """
 Markdown解析服务
-将Markdown内容解析为题目结构
+将Markdown内容解析为题目结构。支持流式解析（与 document_parser 对齐）：
+试卷标题、注意事项、大题、小题、参考答案（可在文末或中间任意位置）。
 """
 import re
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from loguru import logger
 
 from app.models import QuestionResult
+from app.services.exam_structure_utils import (
+    SECTION_HEADER_PATTERN,
+    is_relaxed_section_heading,
+    parse_structure,
+    structure_to_questions,
+    parse_reference_answers,
+    parse_grade_subject,
+    apply_grade_subject_to_questions,
+)
 
 
 class MarkdownParser:
-    """Markdown解析器，从Markdown中提取题目"""
-    
+    """Markdown解析器：流式解析与按题型正则提取两种方式"""
+
+    def parse_markdown_to_exam(
+        self,
+        markdown_content: str,
+    ) -> Tuple[List[QuestionResult], str, str, int, str]:
+        """
+        将 Markdown 流式解析为试卷结构，返回题目列表与元数据（与 document_parser 输出对齐）。
+        Returns:
+            (questions, document_title, document_description, document_grade, document_subject)
+        """
+        logger.info("Parsing markdown to exam structure (stream)")
+        paragraphs, heading_hints = self._markdown_to_paragraphs_and_hints(markdown_content)
+        if not paragraphs:
+            logger.warning("No paragraphs from markdown")
+            return [], "", "", 0, ""
+
+        structure = parse_structure(paragraphs, lambda i: heading_hints[i] if i < len(heading_hints) else False)
+        answer_block_text = "\n".join(structure.answer_block_texts) if structure.answer_block_texts else ""
+        reference_answers = parse_reference_answers(answer_block_text) if answer_block_text else []
+        questions = structure_to_questions(structure, reference_answers)
+        document_grade, document_subject = parse_grade_subject(structure.document_title, markdown_content)
+        apply_grade_subject_to_questions(questions, document_grade, document_subject)
+        logger.info(
+            "Stream parsed: sections=%s, questions=%s, reference_answers=%s",
+            len(structure.sections),
+            len(questions),
+            len(reference_answers),
+        )
+        return (
+            questions,
+            structure.document_title or "",
+            structure.document_description or "",
+            document_grade,
+            document_subject or "",
+        )
+
+    def _markdown_to_paragraphs_and_hints(self, markdown_content: str) -> Tuple[List[str], List[bool]]:
+        """将 Markdown 按双换行拆成段落，并标记每段是否像大题/标题（用于流式解析）。"""
+        blocks = re.split(r"\n\s*\n", markdown_content)
+        paragraphs = []
+        heading_hints = []
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            first_line = block.split("\n")[0].strip()
+            first_line_stripped = first_line
+            while first_line_stripped.startswith("#"):
+                first_line_stripped = first_line_stripped.lstrip("#").strip()
+            para_text = block
+            if block.startswith("#"):
+                lines = block.split("\n")
+                new_lines = []
+                for line in lines:
+                    s = line.strip()
+                    while s.startswith("#"):
+                        s = s.lstrip("#").strip()
+                    new_lines.append(s)
+                para_text = "\n".join(new_lines).strip()
+            paragraphs.append(para_text)
+            hint = (
+                block.startswith("#")
+                or SECTION_HEADER_PATTERN.match(first_line_stripped)
+                or is_relaxed_section_heading(first_line_stripped)
+            )
+            heading_hints.append(hint)
+        return paragraphs, heading_hints
+
     def parse_markdown_to_questions(self, markdown_content: str) -> List[QuestionResult]:
         """
         将Markdown内容解析为题目列表

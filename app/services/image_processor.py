@@ -1,9 +1,12 @@
 """
 图片处理服务
 提取Markdown中的图片，上传到asset-service，并替换路径
+支持：本地路径、http(s) URL、data URL（data:image/...;base64,...）
 """
 import re
 import os
+import base64
+import uuid
 import httpx
 from typing import List, Tuple, Dict, Optional
 from pathlib import Path
@@ -50,7 +53,31 @@ class ImageProcessor:
         
         logger.info(f"Extracted {len(images)} images from markdown")
         return images
-    
+
+    def _save_data_url_to_temp_file(self, data_url: str) -> str:
+        """
+        将 data:image/...;base64,XXX 解码并保存为临时文件，返回本地路径。
+        """
+        if not data_url.startswith("data:image/"):
+            raise ValueError("Not a data URL or unsupported image type")
+        # data:image/png;base64,iVBORw0KG...
+        comma = data_url.find(",")
+        if comma == -1:
+            raise ValueError("Invalid data URL: no comma")
+        header = data_url[:comma].lower()
+        ext = ".png"
+        if "jpeg" in header or "jpg" in header:
+            ext = ".jpg"
+        elif "gif" in header:
+            ext = ".gif"
+        elif "webp" in header:
+            ext = ".webp"
+        b64 = data_url[comma + 1 :]
+        raw = base64.b64decode(b64)
+        path = self.temp_dir / f"{uuid.uuid4().hex}{ext}"
+        path.write_bytes(raw)
+        return str(path)
+
     async def download_image(self, image_url: str, local_path: str) -> str:
         """
         下载图片到本地临时目录
@@ -216,16 +243,18 @@ class ImageProcessor:
             替换后的Markdown内容
         """
         result = markdown_content
-        
+
         for old_path, new_url in image_replacements.items():
-            # 转义特殊字符用于正则表达式
-            escaped_old_path = re.escape(old_path)
-            # 匹配: ![alt](old_path) 并替换为 ![alt](new_url)
-            pattern = rf'!\[([^\]]*)\]\({escaped_old_path}\)'
-            replacement = rf'![\1]({new_url})'
-            result = re.sub(pattern, replacement, result)
-        
-        logger.info(f"Replaced {len(image_replacements)} image paths in markdown")
+            # data URL 或超长路径用简单字符串替换，避免正则性能问题
+            if old_path.startswith("data:") or len(old_path) > 2000:
+                result = result.replace("](" + old_path + ")", "](" + new_url + ")")
+            else:
+                escaped_old_path = re.escape(old_path)
+                pattern = rf'!\[([^\]]*)\]\({escaped_old_path}\)'
+                replacement = rf'![\1]({new_url})'
+                result = re.sub(pattern, replacement, result)
+
+        logger.info("Replaced %s image paths in markdown", len(image_replacements))
         return result
     
     async def process_images_in_markdown(
@@ -258,41 +287,42 @@ class ImageProcessor:
         uploaded_urls = []
         
         for image_path, alt_text in images:
+            image_to_upload = None  # 仅 data URL 或 http 下载时会生成临时文件，需后续删除
             try:
-                # 如果是相对路径，需要结合文档目录
-                if document_base_path and not image_path.startswith(('http://', 'https://')):
-                    full_image_path = os.path.join(document_base_path, image_path)
+                # data URL：MarkItDown 等转换常输出 ![](data:image/png;base64,...)
+                if image_path.startswith("data:image/"):
+                    image_to_upload = self._save_data_url_to_temp_file(image_path)
+                # 相对路径：结合文档目录
+                elif document_base_path and not image_path.startswith(('http://', 'https://')):
+                    image_to_upload = os.path.join(document_base_path, image_path)
                 else:
-                    full_image_path = image_path
-                
-                # 下载图片（如果是URL）
+                    image_to_upload = image_path
+
+                # 下载图片（仅 http(s) 需要下载）
                 if image_path.startswith(('http://', 'https://')):
-                    local_image_path = self.temp_dir / os.path.basename(image_path)
+                    local_image_path = self.temp_dir / (os.path.basename(image_path) or f"{uuid.uuid4().hex}.png")
                     await self.download_image(image_path, str(local_image_path))
                     image_to_upload = str(local_image_path)
-                else:
-                    # 本地路径
-                    image_to_upload = full_image_path
-                
-                # 上传到asset-service
+
+                # 上传到 asset-service
                 uploaded_url = await self.upload_image_to_asset_service(
                     image_to_upload,
                     business_type
                 )
-                
-                # 记录替换映射
+
+                # 记录替换映射（key 为 markdown 中的原串，便于精确替换）
                 image_replacements[image_path] = uploaded_url
                 uploaded_urls.append(uploaded_url)
-                
-                # 清理临时文件
-                if image_path.startswith(('http://', 'https://')):
+
+                # 清理临时文件（data URL 或 http 下载产生的）
+                if image_path.startswith(("data:image/", "http://", "https://")) and image_to_upload and os.path.isfile(image_to_upload):
                     try:
                         os.remove(image_to_upload)
-                    except:
+                    except OSError:
                         pass
-                
+
             except Exception as e:
-                logger.error(f"Failed to process image {image_path}: {e}")
+                logger.error("Failed to process image (path_len=%s): %s", len(image_path), e)
                 # 继续处理其他图片，不中断整个流程
                 continue
         
