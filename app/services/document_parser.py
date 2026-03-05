@@ -73,6 +73,36 @@ def _format_suggests_section_heading(
     return False
 
 
+# 试卷中常见大题标题 pattern：一. 二. 三. … 十. 或 一、二、
+SECTION_HEADING_PATTERN = re.compile(
+    r"^(一|二|三|四|五|六|七|八|九|十)[\.．、]\s*[^\s]"
+)
+
+# 题号/选项序号规范化：全角．、→ 半角. + 空格，便于 exam_structure_utils 与 Markdown 有序列表一致
+QUESTION_NUMBER_NORMALIZE = re.compile(r"^(\d+)[．、]\s*", re.MULTILINE)
+OPTION_MARKER_NORMALIZE = re.compile(r"([A-Da-d])[．、]\s*")
+
+# 缩进转无序列表：约每 18pt 一级，对应 Markdown 每级 2 空格
+INDENT_PT_PER_LEVEL = 18.0
+
+
+def _normalize_markdown_list_markers(text: str) -> str:
+    """将题号/选项序号统一为 Markdown 格式：数字. / A. （半角点+空格），便于后续解析。"""
+    if not text:
+        return text
+    s = QUESTION_NUMBER_NORMALIZE.sub(r"\1. ", text)
+    s = OPTION_MARKER_NORMALIZE.sub(r"\1. ", s)
+    return s
+
+
+def _indent_to_markdown_list_prefix(left_indent_pt: float) -> str:
+    """根据 Word 左缩进返回 Markdown 无序列表前缀（  - /    - / ...）。"""
+    if left_indent_pt <= 0:
+        return ""
+    level = max(1, int(left_indent_pt / INDENT_PT_PER_LEVEL) + 1)
+    return "  " * level + "- "
+
+
 @dataclass
 class ParagraphFormatInfo:
     """Word 段落格式信息，用于辅助判断大题/小题（结构优先）。无格式时为 None。"""
@@ -366,24 +396,76 @@ class DocumentParser:
                 raise ValueError("File is not a valid ZIP/DOCX file")
         doc = Document(file_path)
         document_title = (getattr(doc.core_properties, "title", None) or "").strip()
-        paragraphs, image_paths, _ = self._extract_paragraphs_with_images(doc, file_path)
+        paragraphs, image_paths, format_infos = self._extract_paragraphs_with_images(doc, file_path)
         if not document_title and paragraphs:
             for p in paragraphs:
                 t = (p or "").strip()
                 if t and not t.startswith("{{IMAGE_"):
                     document_title = t[:200].strip()
                     break
-        # 段内 {{IMAGE_N}} 替换为 ![](绝对路径)，便于 process_images_in_markdown 上传
+        # 根据段落格式转为 Markdown：标题层级（# / ##）、缩进→无序列表（  - ）、题号/选项序号规范化
+        body_font_pt = DEFAULT_BODY_FONT_PT
         lines = []
-        for p in paragraphs:
+        first_content_idx = None
+        for i, p in enumerate(paragraphs):
+            t = (p or "").strip()
+            if not t:
+                lines.append("")
+                continue
+            if first_content_idx is None and not t.startswith("{{IMAGE_"):
+                first_content_idx = i
+            fmt = format_infos[i] if i < len(format_infos) else None
+            heading_prefix = self._markdown_heading_prefix_for_paragraph(
+                t, fmt, body_font_pt, is_first_content=(i == first_content_idx)
+            )
             s = p
-            for i, path in enumerate(image_paths):
-                s = s.replace("{{IMAGE_%d}}" % i, "![](%s)" % (path,))
+            for j, path in enumerate(image_paths):
+                s = s.replace("{{IMAGE_%d}}" % j, "![](%s)" % (path,))
+            # 题号/选项序号：全角．、→ 半角. + 空格，便于 markdown 转试卷结构时正则一致
+            s = _normalize_markdown_list_markers(s)
+            # 标题前缀 或 缩进→无序列表前缀（无标题且 left_indent_pt > 0）
+            if heading_prefix:
+                s = heading_prefix + s.strip()
+            else:
+                list_prefix = _indent_to_markdown_list_prefix(fmt.left_indent_pt) if fmt else ""
+                if list_prefix:
+                    s = list_prefix + s.strip()
             lines.append(s)
         markdown_content = "\n\n".join(lines)
         metadata = {"title": document_title}
         logger.info("docx_to_markdown: %s chars, %s images", len(markdown_content), len(image_paths))
         return markdown_content, metadata
+
+    def _markdown_heading_prefix_for_paragraph(
+        self,
+        paragraph_text: str,
+        fmt: Optional[ParagraphFormatInfo],
+        body_font_pt: float,
+        is_first_content: bool,
+    ) -> str:
+        """
+        根据段落文本与格式返回 Markdown 标题前缀，用于保留 Word 标题/顺序层级。
+        - 文档标题（Title 样式或首段且像标题）→ "# "
+        - 大题/节标题（Heading 样式、字号或加粗、或「一. 二.」等）→ "## "
+        - 其余 → ""
+        """
+        style = (fmt.style_name or "").strip().lower() if fmt else ""
+        # Word 标题样式
+        if "title" in style or style == "标题":
+            return "# "
+        if _format_suggests_section_heading(fmt, body_font_pt):
+            # 首段且像标题时作为文档标题，否则作为二级标题
+            if is_first_content and (fmt and fmt.font_size_pt and fmt.font_size_pt >= 16):
+                return "# "
+            return "## "
+        # 无样式时：首段且较短且非纯图片占位，可视为文档标题
+        if is_first_content and paragraph_text and not paragraph_text.startswith("{{IMAGE_"):
+            if len(paragraph_text) < 100 and (not fmt or (fmt.is_bold or (fmt.font_size_pt and fmt.font_size_pt > body_font_pt))):
+                return "# "
+        # 大题 pattern：一.选择题、二.判断题 等（无样式时兜底）
+        if SECTION_HEADING_PATTERN.match(paragraph_text.strip()) and (not fmt or fmt.left_indent_pt <= 0):
+            return "## "
+        return ""
 
     def _get_paragraph_format(self, para) -> ParagraphFormatInfo:
         """从 python-docx 段落对象提取格式信息，用于格式辅助结构判断。"""

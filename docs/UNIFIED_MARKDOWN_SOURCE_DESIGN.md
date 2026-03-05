@@ -82,5 +82,5 @@
 **当前实现要点**：
 
 - **document_consumer._process_document**：按扩展名分支；`.doc` / `.docx` 先尝试 .doc→.docx 转换（仅 .doc），再对 .docx 调 `parser.docx_to_markdown`，否则调 `markdown_converter.convert_to_markdown`；然后统一 `process_images_in_markdown` → `markdown_parser.parse_markdown_to_exam`；临时文件（含转换得到的 .docx）在 finally 中统一 cleanup。
-- **DocumentParser**：`convert_doc_to_docx(doc_path)`、`docx_to_markdown(file_path)` 返回 `(markdown, metadata)`；已移除 `parse_document`。
+- **DocumentParser**：`convert_doc_to_docx(doc_path)`、`docx_to_markdown(file_path)` 返回 `(markdown, metadata)`；已移除 `parse_document`。`docx_to_markdown` 会根据段落格式（样式、字号、加粗）及「一. 二.」等 pattern 输出 Markdown 标题层级（`#` 文档标题、`##` 大题/节标题），避免仅剩纯文本无格式；并将**题号/选项序号**统一为 Markdown 格式（`1. ` / `A. ` 半角点+空格），**缩进**转为无序列表前缀（`  - ` / `    - `），便于后续 markdown 转试卷结构时正则与层级更清晰。
 - **容器运行**：服务运行在容器中时，LibreOffice 需**安装在镜像内**（见本仓库 `Dockerfile` 中的 `libreoffice-writer`），不可只装在宿主机；未安装或转换失败时 .doc 会回退 MarkItDown。

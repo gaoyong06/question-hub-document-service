@@ -295,13 +295,14 @@ class DocumentConsumer:
             )
             if not document_title and metadata:
                 document_title = (metadata.get("title", "") or "").strip()
+            # 存库/返回使用上传后的 markdown（图片已为 URL），避免临时路径失效
             return (
                 questions,
                 document_title or "",
                 document_description or "",
                 document_grade,
                 document_subject or "",
-                markdown_content or "",
+                processed_markdown or "",
             )
 
         finally:
