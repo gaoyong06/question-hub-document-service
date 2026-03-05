@@ -3,8 +3,9 @@
 提取Markdown中的图片，上传到asset-service，并替换路径
 支持：本地路径、http(s) URL、data URL（data:image/...;base64,...）
 """
-import re
+import json
 import os
+import re
 import base64
 import uuid
 import httpx
@@ -183,18 +184,33 @@ class ImageProcessor:
                     headers=headers,
                 )
 
-                # 非 2xx 时记录响应体，便于排查 400 等原因（日志中的 file 为代码文件，此处显式记录上传的文件路径）
+                # 非 2xx 时记录响应体，便于排查 400 等原因；突出 errorCode/errorMessage/traceId 便于与 asset-service 日志对照
                 if not response.is_success:
                     try:
                         body = response.text
                     except Exception:
                         body = "(unable to read response body)"
-                    logger.error(
-                        "asset-service upload failed: image_path={}, status_code={}, response_body={}",
-                        image_path,
-                        response.status_code,
-                        body,
-                    )
+                    try:
+                        err_json = json.loads(body)
+                        code = err_json.get("errorCode") or ""
+                        msg = err_json.get("errorMessage") or err_json.get("message") or ""
+                        trace_id = err_json.get("traceId") or ""
+                        logger.error(
+                            "asset-service upload failed: image_path={}, status_code={}, errorCode={}, errorMessage={}, traceId={} (check asset-service logs for this traceId); full_response={}",
+                            image_path,
+                            response.status_code,
+                            code,
+                            msg,
+                            trace_id,
+                            body,
+                        )
+                    except Exception:
+                        logger.error(
+                            "asset-service upload failed: image_path={}, status_code={}, response_body={}",
+                            image_path,
+                            response.status_code,
+                            body,
+                        )
                     response.raise_for_status()
 
                 result = response.json()
