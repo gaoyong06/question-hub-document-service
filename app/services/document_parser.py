@@ -78,7 +78,7 @@ SECTION_HEADING_PATTERN = re.compile(
     r"^(一|二|三|四|五|六|七|八|九|十)[\.．、]\s*[^\s]"
 )
 
-# 题号/选项序号规范化：全角/半角点、顿号 → 半角. + 空格，便于 exam_structure_utils 与 Markdown 有序列表一致
+# 题号/选项序号规范化：全角/半角点、顿号 → 半角 \. + 空格（转义点号，避免被 Markdown 解析为有序列表导致每题都显示为 1.）
 # 必须包含半角 .，Word 中题号多为半角点（如 1.xxx），否则无法规范化
 QUESTION_NUMBER_NORMALIZE = re.compile(r"^(\d+)[\.．、]\s*", re.MULTILINE)
 OPTION_MARKER_NORMALIZE = re.compile(r"([A-Da-d])[\.．、]\s*")
@@ -88,11 +88,11 @@ INDENT_PT_PER_LEVEL = 18.0
 
 
 def _normalize_markdown_list_markers(text: str) -> str:
-    """将题号/选项序号统一为 Markdown 格式：数字. / A. （半角点+空格），便于后续解析。"""
+    """将题号/选项序号统一为「数字\\. / A\\. 」形式：转义点号避免 Markdown 有序列表语法，渲染时显示为 1. 2. 3. 而非全是 1.；exam_structure_utils 已支持 \\. 可选匹配。"""
     if not text:
         return text
-    s = QUESTION_NUMBER_NORMALIZE.sub(r"\1. ", text)
-    s = OPTION_MARKER_NORMALIZE.sub(r"\1. ", s)
+    s = QUESTION_NUMBER_NORMALIZE.sub(r"\1\\. ", text)
+    s = OPTION_MARKER_NORMALIZE.sub(r"\1\\. ", s)
     return s
 
 
@@ -445,26 +445,38 @@ class DocumentParser:
         is_first_content: bool,
     ) -> str:
         """
-        根据段落文本与格式返回 Markdown 标题前缀，用于保留 Word 标题/顺序层级。
-        - 文档标题（Title 样式或首段且像标题）→ "# "
-        - 大题/节标题（Heading 样式、字号或加粗、或「一. 二.」等）→ "## "
+        根据段落文本、样式与顺序返回 Markdown 标题前缀。
+        优先依据文档样式（字号、加粗、Word 样式）和顺序（首段），其次才用文字 pattern。
+        - 文档标题：首段 + 标题样貌（Title 样式 / 字号明显大于正文 / 加粗）+ 非「一. 二.」→ "# "
+        - 大题/节标题：Heading 样式、或「一. 二.」、或格式像大题且非首段 → "## "
         - 其余 → ""
         """
         style = (fmt.style_name or "").strip().lower() if fmt else ""
-        # Word 标题样式
+        is_section_text = bool(paragraph_text and SECTION_HEADING_PATTERN.match(paragraph_text.strip()))
+        format_like_heading = _format_suggests_section_heading(fmt, body_font_pt)
+
+        # 1. Word 明确标题样式（与是否首段无关）
         if "title" in style or style == "标题":
             return "# "
-        if _format_suggests_section_heading(fmt, body_font_pt):
-            # 首段且像标题时作为文档标题，否则作为二级标题
-            if is_first_content and (fmt and fmt.font_size_pt and fmt.font_size_pt >= 16):
+
+        # 2. 文字明确为大题（一. 二. …）→ 二级标题
+        if is_section_text and (not fmt or fmt.left_indent_pt <= 0):
+            return "## "
+
+        # 3. 格式像标题（字号大、加粗、Heading 样式等）：结合顺序区分「文档标题」与「大题」
+        if format_like_heading:
+            # 首段且不是「一. 二.」→ 视为试卷总标题（通常字号更大、在首行）
+            if is_first_content and paragraph_text and not paragraph_text.startswith("{{IMAGE_") and not is_section_text:
                 return "# "
             return "## "
-        # 无样式时：首段且较短且非纯图片占位，可视为文档标题
-        if is_first_content and paragraph_text and not paragraph_text.startswith("{{IMAGE_"):
+
+        # 4. 无明确样式时：仅当首段 + 较短 + 有标题特征（加粗或字号大于正文）+ 非大题文字 → 文档标题
+        if is_first_content and paragraph_text and not paragraph_text.startswith("{{IMAGE_") and not is_section_text:
             if len(paragraph_text) < 100 and (not fmt or (fmt.is_bold or (fmt.font_size_pt and fmt.font_size_pt > body_font_pt))):
                 return "# "
-        # 大题 pattern：一.选择题、二.判断题 等（无样式时兜底）
-        if SECTION_HEADING_PATTERN.match(paragraph_text.strip()) and (not fmt or fmt.left_indent_pt <= 0):
+
+        # 5. 兜底：仅文字像大题（无格式时）
+        if is_section_text:
             return "## "
         return ""
 

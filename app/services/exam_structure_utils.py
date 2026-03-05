@@ -19,7 +19,8 @@ SECTION_HEADER_PATTERN = re.compile(
     r"^([一二三四五六七八九十]+)[\.．、]\s*(.+)$",
     re.MULTILINE,
 )
-QUESTION_START_PATTERN = re.compile(r"^\d+[\.．、]\s*", re.MULTILINE)
+# 题号支持可选的转义点号（1\. 2\.），与 document_parser 输出的「1\. 」一致，避免被 Markdown 解析为有序列表
+QUESTION_START_PATTERN = re.compile(r"^\d+\\?[\.．、]\s*", re.MULTILINE)
 
 SECTION_RELAXED_KEYWORDS = (
     "选择题", "单选题", "多选题", "填空题", "判断题", "解答题", "计算题", "作图题",
@@ -31,8 +32,8 @@ SECTION_RELAXED_PATTERN = re.compile(
 SECTION_TITLE_MAX_LEN = 80
 
 QUESTION_SPLIT_PATTERNS = [
-    re.compile(r"(?:^|\n)\s*(?=\d+[\.．、]\s)", re.MULTILINE),
-    re.compile(r"(?:^|\n)\s*(?=[a-dA-D][\.．、]\s)", re.MULTILINE),
+    re.compile(r"(?:^|\n)\s*(?=\d+\\?[\.．、]\s)", re.MULTILINE),
+    re.compile(r"(?:^|\n)\s*(?=[a-dA-D]\\?[\.．、]\s)", re.MULTILINE),
     re.compile(r"(?:^|\n)\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])", re.MULTILINE),
     re.compile(r"(?:^|\n)\s*(?=\(\d+\)\s)", re.MULTILINE),
 ]
@@ -79,11 +80,11 @@ def parse_reference_answers(full_text: str) -> List[str]:
     if first_nl != -1:
         first_line = block[:first_nl]
         rest_first = first_line.replace(header, "").strip()
-        if not rest_first or not re.search(r"\d+[\.．、]", rest_first):
+        if not rest_first or not re.search(r"\d+\\?[\.．、]", rest_first):
             block = block[first_nl + 1:]
     else:
         block = re.sub(r"^[\s\S]*?" + re.escape(header), "", block, count=1).strip()
-    pattern = re.compile(r"\d+[\.．、]\s*")
+    pattern = re.compile(r"\d+\\?[\.．、]\s*")
     parts = pattern.split(block)
     for seg in parts:
         ans = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", seg)
@@ -141,7 +142,7 @@ def content_has_choice_options(content: str) -> bool:
     """题干是否包含 A. B. C. D. 选项形式。"""
     if not content or len(content) < 4:
         return False
-    option_markers = re.findall(r"[A-D][\.．、]\s*", content)
+    option_markers = re.findall(r"[A-D]\\?[\.．、]\s*", content)
     return len(option_markers) >= 2
 
 
@@ -149,7 +150,7 @@ def parse_stem_and_options_from_choice_content(content: str) -> Tuple[str, List[
     """从「题干 + A. B. C. D.」形式拆出题干与选项列表。"""
     if not content:
         return "", []
-    parts = re.split(r"(?:\n|^)\s*[A-D][\.．、]\s*", content, maxsplit=0)
+    parts = re.split(r"(?:\n|^)\s*[A-D]\\?[\.．、]\s*", content, maxsplit=0)
     stem = (parts[0].strip() if parts else "").strip()
     options = [p.strip() for p in parts[1:] if p.strip()]
     return stem, options
