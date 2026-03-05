@@ -63,7 +63,8 @@ class MarkdownConverter:
         logger.info(f"Converting document to markdown: {file_path}")
         
         try:
-            result = self.md.convert(file_path)
+            # keep_data_uris=True：保留完整 base64 图片，否则 MarkItDown 默认会截断为 "data:image/png;base64..." 占位导致图片错误（见 https://github.com/microsoft/markitdown/issues/58, PR #1140）
+            result = self.md.convert(file_path, keep_data_uris=True)
             
             markdown_content = result.text_content
             metadata = result.metadata if hasattr(result, 'metadata') else {}

@@ -27,11 +27,11 @@ def main():
         logger.error("File not found: %s", docx_path)
         sys.exit(1)
 
-    # 1. MarkItDown 转 markdown
+    # 1. MarkItDown 转 markdown（keep_data_uris=True 保留完整 base64，否则图片会被截断为占位）
     try:
         from markitdown import MarkItDown
         md = MarkItDown()
-        result = md.convert(docx_path)
+        result = md.convert(docx_path, keep_data_uris=True)
         markdown_content = result.text_content
         logger.info("MarkItDown converted, markdown length: %s", len(markdown_content))
     except Exception as e:
