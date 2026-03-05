@@ -72,7 +72,7 @@ pip install -r requirements.txt
 # 复制环境变量示例文件
 cp .env.example .env
 
-# 编辑 .env，配置 RocketMQ 连接信息与 question-hub API 基地址（必填：QUESTION_HUB_API_BASE_URL）
+# 编辑 .env，配置 RocketMQ 连接信息与 question-hub API 基地址（必填：QUESTION_HUB_SERVICE_API_BASE_URL）
 ```
 
 ### 4. 运行服务
@@ -95,7 +95,8 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 | `ROCKETMQ_TOPIC` | 订阅的 Topic | `question_hub_events` |
 | `ROCKETMQ_CONSUMER_GROUP` | 消费者组名 | `question_hub_document_consumer` |
 | `ROCKETMQ_CONSUME_TAG` | 订阅的 Tag（只消费该 tag 的消息） | `document.convert` |
-| `QUESTION_HUB_API_BASE_URL` | question-hub-service 的 HTTP 基地址（用于提交转换结果，必填） | `http://localhost:8112` |
+| `QUESTION_HUB_SERVICE_API_BASE_URL` | question-hub-service 的 HTTP 基地址（YAML: question_hub_service.api_base_url；用于提交转换结果，必填） | `http://localhost:8112` |
+| `ASSET_SERVICE_API_BASE_URL` | asset-service 的 HTTP 基地址（YAML: asset_service.api_base_url） | `http://localhost:8104` |
 | `DOWNLOAD_TIMEOUT` | 下载超时时间（秒） | `300` |
 | `TEMP_FILE_DIR` | 临时文件目录 | `/tmp/question-hub-documents` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
@@ -120,7 +121,7 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 
 转换完成后，本服务调用 question-hub-service 的接口提交结果（成功或失败均走该 API，不发送 MQ）：
 
-- **接口**：`PUT {QUESTION_HUB_API_BASE_URL}/question-hub/v1/questions/convert/{conversionTaskId}/result`
+- **接口**：`PUT {QUESTION_HUB_SERVICE_API_BASE_URL}/question-hub/v1/questions/convert/{conversionTaskId}/result`
 - **成功时**：body 包含 `status`、`result`（题目列表）、`documentTitle`、`markdownContent` 等，服务端落库并建题、建卷，返回 `paperId`。
 - **失败时**：body 包含 `status: "failed"`、`errorMsg`。
 
@@ -156,7 +157,7 @@ docker build -t question-hub-document-service .
 docker run -d \
   --name document-service \
   -e ROCKETMQ_NAME_SERVER=rocketmq-nameserver:9876 \
-  -e QUESTION_HUB_API_BASE_URL=http://question-hub-service:8112 \
+  -e QUESTION_HUB_SERVICE_API_BASE_URL=http://question-hub-service:8112 \
   question-hub-document-service
 ```
 
@@ -215,7 +216,7 @@ JSON格式示例：
 - 查看日志了解详细错误信息
 
 ### 提交结果失败（Submit result via API failed）
-- 确认 `QUESTION_HUB_API_BASE_URL` 已配置且本服务能访问该地址
+- 确认 `QUESTION_HUB_SERVICE_API_BASE_URL`（或 YAML question_hub_service.api_base_url）已配置且本服务能访问该地址
 - 确认 question-hub-service 已启动且 PUT `/question-hub/v1/questions/convert/{id}/result` 可用
 - 查看日志中的 HTTP 状态码与响应内容
 

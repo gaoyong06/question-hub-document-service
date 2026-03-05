@@ -35,7 +35,7 @@ class DocumentConsumer:
         )
         self.markdown_parser = MarkdownParser()
         self.image_processor = ImageProcessor(
-            asset_service_url=settings.asset_service_url,
+            asset_service_url=settings.asset_service_api_base_url,
             app_id=settings.app_id,
             user_id=""  # 可以从消息中获取
         )
@@ -343,7 +343,7 @@ class DocumentConsumer:
         """通过 HTTP API 将转换结果提交到 question-hub-service（结果落库），成功返回 paper_id，失败无返回值。"""
         base = (settings.question_hub_api_base_url or "").rstrip("/")
         if not base:
-            raise RuntimeError("QUESTION_HUB_API_BASE_URL is not set")
+            raise RuntimeError("QUESTION_HUB_SERVICE_API_BASE_URL is not set")
         url = f"{base}/question-hub/v1/questions/convert/{task_id}/result"
         # 与 question-hub-service API 的 JSON 字段一致（camelCase）
         result_list = []

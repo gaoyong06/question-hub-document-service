@@ -43,7 +43,7 @@ def main():
     from app.services.image_processor import ImageProcessor
 
     processor = ImageProcessor(
-        asset_service_url=settings.asset_service_url,
+        asset_service_url=settings.asset_service_api_base_url,
         app_id=settings.app_id or "test",
         user_id="",
     )
@@ -67,7 +67,7 @@ def main():
                 sys.exit(3)
 
     # 4. 若配置了 asset_service_url 且非占位，则执行完整上传并替换
-    if images and settings.asset_service_url and "localhost" not in settings.asset_service_url:
+    if images and settings.asset_service_api_base_url and "localhost" not in settings.asset_service_api_base_url:
         async def run_upload():
             processed, urls = await processor.process_images_in_markdown(
                 markdown_content,
@@ -89,7 +89,7 @@ def main():
         except Exception as e:
             logger.warning("Full upload/replace skipped or failed (asset-service): %s", e)
     else:
-        logger.info("Skipping full upload (no asset_service_url or localhost). Data URL decode OK.")
+        logger.info("Skipping full upload (no asset_service_api_base_url or localhost). Data URL decode OK.")
 
 if __name__ == "__main__":
     main()

@@ -109,16 +109,16 @@ class Settings(BaseSettings):
         alias="SUPPORTED_EXTENSIONS"
     )
     
-    # Asset Service配置（调用时使用 service.app_id 作为 X-App-Id）。上传成功后嵌入内容的图片 URL 直接使用 asset-service 返回的 data.url
-    asset_service_url: str = Field(
+    # Asset Service 配置（与 question_hub_service 一致使用 api_base_url；调用时使用 service.app_id 作为 X-App-Id）
+    asset_service_api_base_url: str = Field(
         default="http://localhost:8104",
-        alias="ASSET_SERVICE_URL"
+        alias="ASSET_SERVICE_API_BASE_URL"
     )
 
-    # Question Hub Service API 基地址（用于提交转换结果，结果落库后 MQ 只发引用）
+    # Question Hub Service API 基地址（用于提交转换结果）。YAML 为 question_hub_service.api_base_url；本地默认 localhost，线上须为 question-hub 可访问地址（如 http://question-hub-service:8112）
     question_hub_api_base_url: str = Field(
         default="http://localhost:8112",
-        alias="QUESTION_HUB_API_BASE_URL"
+        alias="QUESTION_HUB_SERVICE_API_BASE_URL"
     )
     
     # OCR配置（可选）

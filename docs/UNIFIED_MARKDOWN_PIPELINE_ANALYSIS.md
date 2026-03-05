@@ -89,4 +89,4 @@
 python scripts/test_markdown_images_local.py "/Users/gaoyong/Downloads/题库/一年级-数学/一年级上册数学期末测试卷（达标题）.docx"
 ```
 
-脚本会：MarkItDown 转 markdown → 提取图片（含 data URL）→ 解码 data URL 为临时文件；若配置了 asset_service_url 且非 localhost，会执行完整上传并替换，并打印处理后的 markdown 片段。
+脚本会：MarkItDown 转 markdown → 提取图片（含 data URL）→ 解码 data URL 为临时文件；若配置了 asset_service_api_base_url 且非 localhost，会执行完整上传并替换，并打印处理后的 markdown 片段。

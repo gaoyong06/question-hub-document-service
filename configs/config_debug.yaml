@@ -52,10 +52,13 @@ document:
     - .xml
     - .epub
 
-# Asset Service配置
+# Asset Service 配置（图片上传接口）
 asset_service:
-  url: http://localhost:8104
-  app_id: ""
+  api_base_url: http://localhost:8104
+
+# Question Hub Service 配置（提交转换结果用）
+question_hub_service:
+  api_base_url: http://localhost:8112
 
 # OCR配置（可选）
 ocr:

@@ -132,7 +132,7 @@ class DocumentParser:
             # asset-service 主资源为 GET /asset/v1/files/{fileId}。
             download_url = file_url
             try:
-                internal_parsed = urlparse(settings.asset_service_url)
+                internal_parsed = urlparse(settings.asset_service_api_base_url)
                 internal_host = (internal_parsed.netloc or "").strip()
                 if internal_host and parsed.netloc != internal_host:
                     path = (parsed.path or "").strip("/")
@@ -143,7 +143,7 @@ class DocumentParser:
                             if idx + 1 < len(parts):
                                 file_id = parts[idx + 1]
                                 if len(file_id) == 36 and file_id.count("-") == 4:
-                                    base = settings.asset_service_url.rstrip("/")
+                                    base = settings.asset_service_api_base_url.rstrip("/")
                                     download_url = f"{base}/asset/v1/files/{file_id}"
                                     logger.info(f"Using internal asset URL for download: {download_url}")
             except Exception as e:
