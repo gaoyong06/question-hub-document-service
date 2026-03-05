@@ -420,10 +420,10 @@ class DocumentParser:
                 t, fmt, body_font_pt, is_first_content=(i == first_content_idx)
             )
             s = p
+            # 先做题号/选项序号规范化（仅对占位符段落），再替换为图片路径；否则路径中的 "x.png" 会被 OPTION_MARKER_NORMALIZE 误匹配（如 c9cb 的 b.）变成 "x. png" 导致上传时文件不存在
+            s = _normalize_markdown_list_markers(s)
             for j, path in enumerate(image_paths):
                 s = s.replace("{{IMAGE_%d}}" % j, "![](%s)" % (path,))
-            # 题号/选项序号：全角．、→ 半角. + 空格，便于 markdown 转试卷结构时正则一致
-            s = _normalize_markdown_list_markers(s)
             # 标题前缀 或 缩进→无序列表前缀（无标题且 left_indent_pt > 0）
             if heading_prefix:
                 s = heading_prefix + s.strip()
