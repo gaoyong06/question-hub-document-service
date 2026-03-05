@@ -201,62 +201,43 @@ class DocumentConsumer:
                     logger.error("Failed to submit failed result via API: %s", api_err)
             return ConsumeStatus.RECONSUME_LATER
     
-    async def _upload_docx_images_and_replace_placeholders(
-        self,
-        questions: list,
-        image_paths: list,
-        business_type: str = "question_image",
-    ) -> list:
-        """上传 docx 中提取的图片，将题目 content 中的 {{IMAGE_N}} 替换为 Markdown 图片并写入 question.images。"""
-        import re
-        replacements = {}  # placeholder -> url
-        for i, path in enumerate(image_paths):
-            placeholder = "{{IMAGE_%d}}" % i
-            try:
-                url = await self.image_processor.upload_image_to_asset_service(path, business_type)
-                replacements[placeholder] = url
-            except Exception as e:
-                logger.warning("Upload image %s failed: %s", path, e)
-        markdown_by_ph = {ph: "![image](%s)" % url for ph, url in replacements.items()}
-        for q in questions:
-            # 题干、参考答案、解析中均可能含图片占位符，统一替换
-            for ph, url in replacements.items():
-                markdown_img = markdown_by_ph[ph]
-                if q.content and ph in q.content:
-                    q.content = q.content.replace(ph, markdown_img)
-                    if q.images is None:
-                        q.images = []
-                    q.images.append(url)
-                if q.answer and ph in q.answer:
-                    q.answer = q.answer.replace(ph, markdown_img)
-                if q.explanation and ph in q.explanation:
-                    q.explanation = q.explanation.replace(ph, markdown_img)
-        return questions
-
     def _process_document(self, message: DocumentConvertMessage) -> tuple:
         """处理文档转换。返回 (题目列表, document_title, document_description, document_grade, document_subject, markdown_content)。
-        markdown_content 为 MarkItDown 转换后的原文（仅当已转换时非空），用于与 python-docx 效果对比与持久化。"""
+        markdown_content：Word(.doc/.docx) 由 python-docx 生成，其他格式由 MarkItDown 生成；用于持久化与试卷解析。"""
         file_path = None
         document_title = ""
         document_description = ""
         document_grade = 0
         document_subject = ""
         markdown_content = ""
+        metadata = {}
+        paths_to_cleanup = []
         try:
             # 下载文件
             file_path = self.parser.download_file(message.file_url)
-            
-            # 统一流程：所有格式 → MarkItDown → 图片上传替换 → Markdown 流式解析
+            paths_to_cleanup.append(file_path)
             file_ext = os.path.splitext(file_path)[1].lower()
-            if not self.markdown_converter:
-                raise RuntimeError("MarkItDown is not available.")
-            if not self.markdown_converter.is_supported_format(file_path):
-                raise ValueError(f"Unsupported file format: {file_ext}")
 
-            # 1. 转为 Markdown（含 .doc/.docx）
-            markdown_content, metadata = self.markdown_converter.convert_to_markdown(file_path)
+            # 1. 得到 markdown_content：Word(.doc/.docx) 用 python-docx，其他用 MarkItDown
+            if file_ext in (".doc", ".docx"):
+                if file_ext == ".doc":
+                    docx_path = self.parser.convert_doc_to_docx(file_path)
+                    if docx_path:
+                        paths_to_cleanup.append(docx_path)
+                        file_path = docx_path
+                if file_path.lower().endswith(".docx"):
+                    markdown_content, metadata = self.parser.docx_to_markdown(file_path)
+                else:
+                    # .doc 转 .docx 失败，回退 MarkItDown
+                    if not self.markdown_converter:
+                        raise RuntimeError("MarkItDown is not available.")
+                    markdown_content, metadata = self.markdown_converter.convert_to_markdown(file_path)
+            else:
+                if not self.markdown_converter or not self.markdown_converter.is_supported_format(file_path):
+                    raise ValueError(f"Unsupported file format: {file_ext}")
+                markdown_content, metadata = self.markdown_converter.convert_to_markdown(file_path)
 
-            # 2. 图片：data URL / 本地 / 网络 → 上传 asset-service，在 markdown 中替换为 URL
+            # 2. 图片：data URL / 本地 / 网络 → 上传 asset-service，在 markdown 中替换为 URL（方案 A：统一走 process_images_in_markdown）
             import asyncio
             try:
                 try:
@@ -324,9 +305,10 @@ class DocumentConsumer:
             )
 
         finally:
-            # 清理临时文件
-            if file_path:
-                self.parser.cleanup(file_path)
+            # 清理临时文件（含下载文件及 .doc 转换得到的 .docx）
+            for p in paths_to_cleanup:
+                if p:
+                    self.parser.cleanup(p)
     
     def _submit_result_via_api(
         self,

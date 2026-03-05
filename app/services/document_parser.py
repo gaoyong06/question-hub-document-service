@@ -1,12 +1,13 @@
 """
 文档解析服务
-使用python-docx解析Word文档（.doc, .docx）
-其他格式通过MarkItDown转换为Markdown后解析
+使用 python-docx 将 Word（.docx，或 .doc 先转为 .docx）转为 Markdown，供统一流水线解析。
+其他格式通过 MarkItDown 转换为 Markdown 后解析。
 """
 from __future__ import annotations
 
 import os
 import re
+import subprocess
 import tempfile
 import zipfile
 import uuid
@@ -318,103 +319,71 @@ class DocumentParser:
         
         logger.info(f"File downloaded successfully: {local_path}, size: {file_size} bytes, signature: PK")
         return str(local_path)
-    
-    def parse_document(self, file_path: str) -> Tuple[List[QuestionResult], List[str], str, str, int, str]:
+
+    def convert_doc_to_docx(self, doc_path: str) -> Optional[str]:
         """
-        解析Word文档，提取题目、图片路径、文档标题、注意事项、年级与学科。
+        将 .doc 转为 .docx（依赖系统 LibreOffice soffice），便于后续用 python-docx 转 Markdown。
 
         Args:
-            file_path: 本地文件路径
+            doc_path: 本地 .doc 文件路径
 
         Returns:
-            (题目列表, 图片本地路径列表, document_title, document_description, document_grade, document_subject)。
-            题目 content 中可能含 {{IMAGE_0}}、{{IMAGE_1}} 等占位符；document_grade 为 1-9，未识别为 0；
-            document_subject 为学科名（如数学、语文），未识别为空字符串。
+            转换后的 .docx 路径；若未安装 soffice 或转换失败则返回 None，调用方可用 MarkItDown 处理 .doc。
         """
-        logger.info(f"Parsing document: {file_path}")
+        if not os.path.isfile(doc_path) or not doc_path.lower().endswith(".doc"):
+            return None
+        out_dir = os.path.dirname(doc_path)
+        try:
+            subprocess.run(
+                ["soffice", "--headless", "--convert-to", "docx", "--outdir", out_dir, doc_path],
+                check=True,
+                capture_output=True,
+                timeout=60,
+            )
+            docx_path = os.path.splitext(doc_path)[0] + ".docx"
+            if os.path.isfile(docx_path):
+                logger.info("Converted .doc to .docx: %s", docx_path)
+                return docx_path
+        except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as e:
+            logger.warning("soffice convert .doc to .docx failed (use MarkItDown for .doc): %s", e)
+        return None
 
-        if not os.path.exists(file_path):
-            logger.error("File does not exist at path: %s", file_path)
+    def docx_to_markdown(self, file_path: str) -> Tuple[str, dict]:
+        """
+        从 .docx 文件生成 Markdown 字符串（段落间 \\n\\n，段内保留 {{IMAGE_N}} 替换为 ![](本地绝对路径)），
+        供统一走 process_images_in_markdown 上传图片后得到最终 markdown_content。
+
+        Args:
+            file_path: 本地 .docx 文件路径（必须是 OOXML，即 .docx）
+
+        Returns:
+            (markdown_content, metadata)，metadata 含 title 等，与 MarkItDown 返回格式对齐。
+        """
+        if not os.path.isfile(file_path):
             raise FileNotFoundError(f"File does not exist: {file_path}")
-
-        file_size = os.path.getsize(file_path)
-        logger.info("File exists. Path: %s, Size: %s bytes.", file_path, file_size)
-
-        if file_size == 0:
-            raise ValueError(f"File is empty: {file_path}")
-
         with open(file_path, "rb") as f:
             if f.read(2) != b"PK":
                 raise ValueError("File is not a valid ZIP/DOCX file")
-
-        try:
-            if not os.path.exists(file_path):
-                raise FileNotFoundError(f"File was deleted before parsing: {file_path}")
-
-            doc = Document(file_path)
-            # 文档标题：优先 core_properties.title，否则取首段非空文本（供下游作为试卷名称）
-            document_title = (getattr(doc.core_properties, "title", None) or "").strip()
-            # 带图片占位符的段落文本、图片路径、每段格式信息（供结构解析辅助大题/小题判断）
-            paragraphs, image_paths, format_infos = self._extract_paragraphs_with_images(doc, file_path)
-            if not document_title and paragraphs:
-                for p in paragraphs:
-                    t = (p or "").strip()
-                    if t and not t.startswith("{{IMAGE_"):
-                        document_title = t[:200].strip()
-                        break
-
-            full_text = "\n".join(paragraphs)
-            if full_text:
-                preview = full_text[:1000] if len(full_text) > 1000 else full_text
-                logger.info("Extracted text preview (first 1000 chars):\n%s", preview)
-                logger.info("Full text length: %s characters", len(full_text))
-            else:
-                logger.warning("No text content extracted from document")
-
-            # 优先：流式结构解析（先解析结构，再映射为业务数据；有格式时用格式辅助大题判断）
-            structure = self._parse_structure(paragraphs, format_infos)
-            total_from_structure = sum(len(contents) for _, _, contents in structure.sections)
-            if total_from_structure > 0:
-                document_description = ""
-                answer_block_text = "\n".join(structure.answer_block_texts) if structure.answer_block_texts else ""
-                reference_answers = self._parse_reference_answers(answer_block_text) if answer_block_text else []
-                logger.info("Structure path: sections=%s, questions=%s, reference_answers=%s",
-                            len(structure.sections), total_from_structure, len(reference_answers))
-                questions = structure_to_questions_common(structure, reference_answers)
-                if structure.document_title:
-                    document_title = structure.document_title
-                if structure.document_description:
-                    document_description = structure.document_description
-                logger.info("Extracted %s questions from document (structure path)", len(questions))
-                document_grade, document_subject = parse_grade_subject_common(document_title, full_text)
-                apply_grade_subject_to_questions_common(questions, document_grade, document_subject)
-                if document_grade or document_subject:
-                    logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
-                return questions, image_paths, document_title, document_description, document_grade, document_subject
-
-            # 回退：原正则流程
-            reference_answers = self._parse_reference_answers(full_text)
-            logger.info("Parsed reference answers count: %s", len(reference_answers))
-            sections = self._detect_sections(full_text)
-            logger.info("Detected sections count: %s", len(sections))
-            questions_with_pos = self._extract_questions_with_positions(full_text, paragraphs)
-            questions = self._sort_and_fill_answers(questions_with_pos, reference_answers, sections)
-            document_description = self._parse_document_description(full_text)
-            if document_description:
-                logger.info("Extracted document_description (notes) length: %s chars", len(document_description))
-            logger.info("Extracted %s questions from document (fallback path)", len(questions))
-            if len(questions) == 0 and paragraphs:
-                logger.warning("No questions extracted, but document has content. Check regex patterns.")
-                logger.info("First 5 paragraphs:\n%s", "\n".join(paragraphs[:5]))
-            document_grade, document_subject = parse_grade_subject_common(document_title, full_text)
-            apply_grade_subject_to_questions_common(questions, document_grade, document_subject)
-            if document_grade or document_subject:
-                logger.info("Recognized document_grade=%s, document_subject=%s", document_grade, document_subject)
-            return questions, image_paths, document_title, document_description, document_grade, document_subject
-
-        except Exception as e:
-            logger.error("Failed to parse document: %s", e)
-            raise
+        doc = Document(file_path)
+        document_title = (getattr(doc.core_properties, "title", None) or "").strip()
+        paragraphs, image_paths, _ = self._extract_paragraphs_with_images(doc, file_path)
+        if not document_title and paragraphs:
+            for p in paragraphs:
+                t = (p or "").strip()
+                if t and not t.startswith("{{IMAGE_"):
+                    document_title = t[:200].strip()
+                    break
+        # 段内 {{IMAGE_N}} 替换为 ![](绝对路径)，便于 process_images_in_markdown 上传
+        lines = []
+        for p in paragraphs:
+            s = p
+            for i, path in enumerate(image_paths):
+                s = s.replace("{{IMAGE_%d}}" % i, "![](%s)" % (path,))
+            lines.append(s)
+        markdown_content = "\n\n".join(lines)
+        metadata = {"title": document_title}
+        logger.info("docx_to_markdown: %s chars, %s images", len(markdown_content), len(image_paths))
+        return markdown_content, metadata
 
     def _get_paragraph_format(self, para) -> ParagraphFormatInfo:
         """从 python-docx 段落对象提取格式信息，用于格式辅助结构判断。"""
