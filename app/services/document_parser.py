@@ -78,9 +78,10 @@ SECTION_HEADING_PATTERN = re.compile(
     r"^(一|二|三|四|五|六|七|八|九|十)[\.．、]\s*[^\s]"
 )
 
-# 题号/选项序号规范化：全角．、→ 半角. + 空格，便于 exam_structure_utils 与 Markdown 有序列表一致
-QUESTION_NUMBER_NORMALIZE = re.compile(r"^(\d+)[．、]\s*", re.MULTILINE)
-OPTION_MARKER_NORMALIZE = re.compile(r"([A-Da-d])[．、]\s*")
+# 题号/选项序号规范化：全角/半角点、顿号 → 半角. + 空格，便于 exam_structure_utils 与 Markdown 有序列表一致
+# 必须包含半角 .，Word 中题号多为半角点（如 1.xxx），否则无法规范化
+QUESTION_NUMBER_NORMALIZE = re.compile(r"^(\d+)[\.．、]\s*", re.MULTILINE)
+OPTION_MARKER_NORMALIZE = re.compile(r"([A-Da-d])[\.．、]\s*")
 
 # 缩进转无序列表：约每 18pt 一级，对应 Markdown 每级 2 空格
 INDENT_PT_PER_LEVEL = 18.0
