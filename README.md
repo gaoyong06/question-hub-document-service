@@ -4,13 +4,13 @@
 
 ## 功能特性
 
-- ✅ 监听RocketMQ消息队列，接收文档转换任务
+- ✅ 监听 RocketMQ 消息队列（Topic `question_hub_events`，Tag `document.convert`），接收文档转换任务
 - ✅ 支持多种文档格式：Word (.doc, .docx)、PDF (.pdf)、PowerPoint (.ppt, .pptx)、Excel (.xls, .xlsx)、图片 (.jpg, .jpeg, .png, .gif, .bmp)、文本 (.txt, .html, .csv, .json, .xml)、EPUB (.epub)
-- ✅ 自动转换文档为Markdown格式（非Word格式）
+- ✅ 自动转换文档为 Markdown 格式（非 Word 格式）
 - ✅ 解析文档内容，提取文本和图片
 - ✅ 识别题目类型（单选题、多选题、填空题、判断题、解答题）
 - ✅ 提取题目内容、选项、答案、解析
-- ✅ 发送转换结果到RocketMQ队列
+- ✅ 转换完成后通过 **HTTP API** 将结果提交至 question-hub-service（`PUT /question-hub/v1/questions/convert/{conversionTaskId}/result`），不通过 MQ 发送结果
 
 ## 技术栈
 
@@ -32,12 +32,16 @@ question-hub-document-service/
 │   ├── config.py            # 配置管理
 │   ├── models.py            # 数据模型
 │   ├── consumers/           # 消息消费者
-│   │   └── document_consumer.py
+│   │   └── document_consumer.py   # 消费 document.convert，转换后通过 API 提交结果
 │   └── services/            # 业务逻辑
-│       └── document_parser.py
+│       ├── document_parser.py    # 文档解析与题目提取
+│       ├── markdown_parser.py    # Markdown 解析
+│       ├── markdown_converter.py # 多格式转 Markdown（markitdown）
+│       └── ...
+├── configs/                 # 配置文件（config_debug.yaml / config_release.yaml）
 ├── requirements.txt         # 依赖列表
-├── .env.example            # 环境变量示例
-├── Dockerfile              # Docker配置
+├── .env.example             # 环境变量示例
+├── Dockerfile               # Docker 配置
 └── README.md
 ```
 
@@ -62,16 +66,16 @@ source venv310/bin/activate # Windows: venv310\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. 配置环境变量
+### 3. 配置环境变量
 
 ```bash
 # 复制环境变量示例文件
 cp .env.example .env
 
-# 编辑.env文件，配置RabbitMQ连接信息
+# 编辑 .env，配置 RocketMQ 连接信息与 question-hub API 基地址（必填：QUESTION_HUB_API_BASE_URL）
 ```
 
-### 3. 运行服务
+### 4. 运行服务
 
 ```bash
 # 直接运行
@@ -88,19 +92,20 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 | 变量名 | 说明 | 默认值 |
 |--------|------|--------|
 | `ROCKETMQ_NAME_SERVER` | RocketMQ NameServer 地址 | `localhost:9876` |
-| `ROCKETMQ_TOPIC` | Topic名称 | `question_hub_events` |
+| `ROCKETMQ_TOPIC` | 订阅的 Topic | `question_hub_events` |
 | `ROCKETMQ_CONSUMER_GROUP` | 消费者组名 | `question_hub_document_consumer` |
-| `ROCKETMQ_PRODUCER_GROUP` | 生产者组名 | `question_hub_document_producer` |
-| `ROCKETMQ_CONSUME_TAG` | 消费Tag（接收） | `document.convert` |
-| `ROCKETMQ_PUBLISH_TAG` | 发布Tag（发送） | `document.convert.result` |
+| `ROCKETMQ_CONSUME_TAG` | 订阅的 Tag（只消费该 tag 的消息） | `document.convert` |
+| `QUESTION_HUB_API_BASE_URL` | question-hub-service 的 HTTP 基地址（用于提交转换结果，必填） | `http://localhost:8112` |
 | `DOWNLOAD_TIMEOUT` | 下载超时时间（秒） | `300` |
 | `TEMP_FILE_DIR` | 临时文件目录 | `/tmp/question-hub-documents` |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
 | `LOG_FORMAT` | 日志格式（json/text） | `json` |
 
-## 消息格式
+## 消息与 API
 
-### 接收消息（DocumentConvertMessage）
+### 接收消息（MQ，DocumentConvertMessage）
+
+从 RocketMQ Topic `question_hub_events`、Tag `document.convert` 消费，消息体示例：
 
 ```json
 {
@@ -111,36 +116,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 }
 ```
 
-### 发送消息（DocumentConvertResultMessage）
+### 提交结果（HTTP API）
 
-成功：
-```json
-{
-  "task_id": "uuid-string",
-  "status": "completed",
-  "result": [
-    {
-      "type": "single-choice",
-      "content": "题目内容",
-      "options": ["选项A", "选项B", "选项C", "选项D"],
-      "answer": "A",
-      "explanation": "解析内容",
-      "difficulty": "medium",
-      "grade": 1,
-      "subject": "数学"
-    }
-  ]
-}
-```
+转换完成后，本服务调用 question-hub-service 的接口提交结果（成功或失败均走该 API，不发送 MQ）：
 
-失败：
-```json
-{
-  "task_id": "uuid-string",
-  "status": "failed",
-  "error_msg": "错误信息"
-}
-```
+- **接口**：`PUT {QUESTION_HUB_API_BASE_URL}/question-hub/v1/questions/convert/{conversionTaskId}/result`
+- **成功时**：body 包含 `status`、`result`（题目列表）、`documentTitle`、`markdownContent` 等，服务端落库并建题、建卷，返回 `paperId`。
+- **失败时**：body 包含 `status: "failed"`、`errorMsg`。
 
 ## 题目识别规则
 
@@ -164,16 +146,17 @@ uvicorn app.main:app --host 0.0.0.0 --port 8122
 - 匹配模式：`题目 + 解析：...`
 - 示例：`1. 题目内容 解析：解析内容`
 
-## Docker部署
+## Docker 部署
 
 ```bash
 # 构建镜像
 docker build -t question-hub-document-service .
 
-# 运行容器
+# 运行容器（需配置 RocketMQ 与 question-hub API 地址）
 docker run -d \
   --name document-service \
-  -e RABBITMQ_URL=amqp://guest:guest@rabbitmq:5672/ \
+  -e ROCKETMQ_NAME_SERVER=rocketmq-nameserver:9876 \
+  -e QUESTION_HUB_API_BASE_URL=http://question-hub-service:8112 \
   question-hub-document-service
 ```
 
@@ -230,6 +213,11 @@ JSON格式示例：
 - 检查文档格式是否支持（支持 Word、PDF、PowerPoint、Excel、图片、文本、EPUB 等）
 - 检查题目格式是否符合识别规则
 - 查看日志了解详细错误信息
+
+### 提交结果失败（Submit result via API failed）
+- 确认 `QUESTION_HUB_API_BASE_URL` 已配置且本服务能访问该地址
+- 确认 question-hub-service 已启动且 PUT `/question-hub/v1/questions/convert/{id}/result` 可用
+- 查看日志中的 HTTP 状态码与响应内容
 
 ## 许可证
 

@@ -6,13 +6,14 @@ import json
 import os
 import traceback
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 from loguru import logger
+import httpx
 
-from rocketmq.client import Producer, PushConsumer, Message, ConsumeStatus
+from rocketmq.client import PushConsumer, ConsumeStatus
 
 from app.config import settings
-from app.models import DocumentConvertMessage, DocumentConvertResultMessage
+from app.models import DocumentConvertMessage, QuestionResult
 from app.services.document_parser import DocumentParser
 from app.services.markdown_converter import MarkdownConverter, MARKITDOWN_AVAILABLE
 from app.services.markdown_parser import MarkdownParser
@@ -24,7 +25,6 @@ class DocumentConsumer:
     
     def __init__(self):
         self.consumer: Optional[PushConsumer] = None
-        self.producer: Optional[Producer] = None
         self.parser = DocumentParser()
         self.markdown_converter = (
             MarkdownConverter(
@@ -56,14 +56,6 @@ class DocumentConsumer:
             logger.info(f"Setting NameServer address: {settings.rocketmq_name_server}")
             self.consumer.set_name_server_address(settings.rocketmq_name_server)
             logger.info("NameServer address set successfully")
-            
-            # 创建生产者（用于发送结果）
-            logger.info("Creating Producer...")
-            self.producer = Producer(settings.rocketmq_producer_group)
-            self.producer.set_name_server_address(settings.rocketmq_name_server)
-            self.producer.start()
-            logger.info("Producer started successfully")
-            
             logger.info("Connected to RocketMQ successfully")
             
         except Exception as e:
@@ -172,20 +164,18 @@ class DocumentConsumer:
             # 处理文档转换（含识别出的年级、学科；markdown_content 为 MarkItDown 转换结果，供持久化与对比）
             questions, document_title, document_description, document_grade, document_subject, markdown_content = self._process_document(message)
 
-            # 发送成功结果（document_title/description 供试卷；document_grade/subject 供试卷与题目；markdown_content 存入 conversion_task）
-            result_message = DocumentConvertResultMessage(
+            # 仅通过 HTTP API 提交结果，不发 MQ
+            paper_id = self._submit_result_via_api(
                 task_id=task_id,
                 status="completed",
-                result=questions,
-                document_title=document_title or None,
-                document_description=(document_description or "").strip() or None,
-                document_grade=document_grade if document_grade and 1 <= document_grade <= 9 else None,
-                document_subject=(document_subject or "").strip() or None,
-                markdown_content=(markdown_content or "").strip() or None,
+                questions=questions,
+                document_title=document_title or "",
+                document_description=(document_description or "").strip(),
+                document_grade=document_grade if document_grade and 1 <= document_grade <= 9 else 0,
+                document_subject=(document_subject or "").strip(),
+                markdown_content=(markdown_content or "").strip(),
             )
-            self._send_result(result_message)
-            
-            logger.info(f"Task completed successfully: task_id={task_id}, questions={len(questions)}")
+            logger.info(f"Task completed successfully: task_id={task_id}, questions={len(questions)}, paper_id={paper_id or ''}")
             
             return ConsumeStatus.CONSUME_SUCCESS
             
@@ -193,19 +183,22 @@ class DocumentConsumer:
             logger.error(f"Failed to process task {task_id}: {e}")
             logger.error(traceback.format_exc())
             
-            # 发送失败结果
+            # 失败时也通过 API 上报（更新 conversion_task 状态与 error_msg），不发 MQ
             if task_id:
-                result_message = DocumentConvertResultMessage(
-                    task_id=task_id,
-                    status="failed",
-                    error_msg=str(e)
-                )
                 try:
-                    self._send_result(result_message)
-                except Exception as send_err:
-                    logger.error(f"Failed to send error result: {send_err}")
-            
-            # 返回失败，RocketMQ会自动重试
+                    self._submit_result_via_api(
+                        task_id=task_id,
+                        status="failed",
+                        questions=[],
+                        document_title="",
+                        document_description="",
+                        document_grade=0,
+                        document_subject="",
+                        markdown_content="",
+                        error_msg=str(e),
+                    )
+                except Exception as api_err:
+                    logger.error("Failed to submit failed result via API: %s", api_err)
             return ConsumeStatus.RECONSUME_LATER
     
     async def _upload_docx_images_and_replace_placeholders(
@@ -335,34 +328,62 @@ class DocumentConsumer:
             if file_path:
                 self.parser.cleanup(file_path)
     
-    def _send_result(self, result_message: DocumentConvertResultMessage):
-        """发送转换结果到RocketMQ"""
-        if not self.producer:
-            raise RuntimeError("Producer not initialized")
-        
+    def _submit_result_via_api(
+        self,
+        task_id: str,
+        status: str,
+        questions: List[QuestionResult],
+        document_title: str,
+        document_description: str,
+        document_grade: int,
+        document_subject: str,
+        markdown_content: str,
+        error_msg: str = "",
+    ) -> Optional[str]:
+        """通过 HTTP API 将转换结果提交到 question-hub-service（结果落库），成功返回 paper_id，失败无返回值。"""
+        base = (settings.question_hub_api_base_url or "").rstrip("/")
+        if not base:
+            raise RuntimeError("QUESTION_HUB_API_BASE_URL is not set")
+        url = f"{base}/question-hub/v1/questions/convert/{task_id}/result"
+        # 与 question-hub-service API 的 JSON 字段一致（camelCase）
+        result_list = []
+        for q in questions:
+            result_list.append({
+                "type": q.type,
+                "content": q.content,
+                "options": q.options or [],
+                "answer": q.answer,
+                "explanation": q.explanation or "",
+                "images": q.images or [],
+                "difficulty": getattr(q, "difficulty", "medium") or "medium",
+                "grade": getattr(q, "grade", 1) or 1,
+                "subject": getattr(q, "subject", "") or "",
+                "tags": q.tags or [],
+                "sectionTitle": q.section_title or "",
+                "sectionOrder": q.section_order or 0,
+            })
+        body = {
+            "status": status,
+            "result": result_list,
+            "errorMsg": error_msg,
+            "documentTitle": document_title,
+            "documentDescription": document_description,
+            "documentGrade": document_grade,
+            "documentSubject": document_subject,
+            "markdownContent": markdown_content,
+        }
         try:
-            message_body = json.dumps(
-                result_message.model_dump(by_alias=True),
-                ensure_ascii=False
-            )
-            
-            msg = Message(settings.rocketmq_topic)
-            msg.set_tags(settings.rocketmq_publish_tag)
-            msg.set_body(message_body.encode('utf-8'))
-            
-            result = self.producer.send_sync(msg)
-            
-            logger.info(f"Sent result message: task_id={result_message.task_id}, status={result_message.status}, msgId={result.msg_id}")
-            
+            with httpx.Client(timeout=60.0) as client:
+                resp = client.put(url, json=body)
+                resp.raise_for_status()
+                data = resp.json()
+                return (data.get("paperId") or "").strip() or None
         except Exception as e:
-            logger.error(f"Failed to send result message: {e}")
-            logger.error(traceback.format_exc())
+            logger.error("Submit result via API failed: %s", e)
             raise
-    
+
     def close(self):
         """关闭连接"""
         if self.consumer:
             self.consumer.shutdown()
-        if self.producer:
-            self.producer.shutdown()
         logger.info("RocketMQ connection closed")

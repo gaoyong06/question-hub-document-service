@@ -75,17 +75,9 @@ class Settings(BaseSettings):
         default="question_hub_document_consumer",
         alias="ROCKETMQ_CONSUMER_GROUP"
     )
-    rocketmq_producer_group: str = Field(
-        default="question_hub_document_producer",
-        alias="ROCKETMQ_PRODUCER_GROUP"
-    )
     rocketmq_consume_tag: str = Field(
         default="document.convert",
         alias="ROCKETMQ_CONSUME_TAG"
-    )
-    rocketmq_publish_tag: str = Field(
-        default="document.convert.result",
-        alias="ROCKETMQ_PUBLISH_TAG"
     )
     
     # 文件下载配置
@@ -121,6 +113,12 @@ class Settings(BaseSettings):
     asset_service_url: str = Field(
         default="http://localhost:8104",
         alias="ASSET_SERVICE_URL"
+    )
+
+    # Question Hub Service API 基地址（用于提交转换结果，结果落库后 MQ 只发引用）
+    question_hub_api_base_url: str = Field(
+        default="http://localhost:8112",
+        alias="QUESTION_HUB_API_BASE_URL"
     )
     
     # OCR配置（可选）

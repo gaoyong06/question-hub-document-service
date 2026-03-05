@@ -9,14 +9,12 @@ service:
   version: 1.0.0
   app_id: "00000000-0000-0000-0000-000000000002"  # 与 question-hub 的 APP_ID 一致
 
-# RocketMQ配置
+# RocketMQ配置（仅消费 document.convert 任务，结果通过 HTTP API 提交，不再发送 MQ）
 rocketmq:
   name_server: rocketmq:9876
   topic: question_hub_events
   consumer_group: question_hub_document_consumer
-  producer_group: question_hub_document_producer
   consume_tag: document.convert
-  publish_tag: document.convert.result
 
 # 文件下载配置
 download:
