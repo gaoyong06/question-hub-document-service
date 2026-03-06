@@ -12,10 +12,12 @@ from app.services.exam_structure_utils import (
     SECTION_HEADER_PATTERN,
     is_relaxed_section_heading,
     parse_structure,
+    parse_structure_from_blocks,
     structure_to_questions,
     parse_reference_answers,
     parse_grade_subject,
     apply_grade_subject_to_questions,
+    StructureBlock,
 )
 
 
@@ -31,13 +33,13 @@ class MarkdownParser:
         Returns:
             (questions, document_title, document_description, document_grade, document_subject)
         """
-        logger.info("Parsing markdown to exam structure (stream)")
-        paragraphs, heading_hints = self._markdown_to_paragraphs_and_hints(markdown_content)
-        if not paragraphs:
-            logger.warning("No paragraphs from markdown")
+        logger.info("Parsing markdown to exam structure (stream, format-aware)")
+        blocks = self._markdown_to_structure_blocks(markdown_content)
+        if not blocks:
+            logger.warning("No structure blocks from markdown")
             return [], "", "", 0, ""
 
-        structure = parse_structure(paragraphs, lambda i: heading_hints[i] if i < len(heading_hints) else False)
+        structure = parse_structure_from_blocks(blocks)
         answer_block_text = "\n".join(structure.answer_block_texts) if structure.answer_block_texts else ""
         reference_answers = parse_reference_answers(answer_block_text) if answer_block_text else []
         questions = structure_to_questions(structure, reference_answers)
@@ -57,8 +59,56 @@ class MarkdownParser:
             document_subject or "",
         )
 
+    def _markdown_to_structure_blocks(self, markdown_content: str) -> List[StructureBlock]:
+        """
+        流式解析 Markdown，按双换行拆块，并依据格式产出结构块类型。
+        - # -> h1, ## -> h2, ### -> h3 … 用于试卷标题/大题层级
+        - 以 - 或 * 开头的行组成的块 -> unordered_list（如注意事项条目）
+        - 其余 -> paragraph（题目正文、题号 1. 2. 等保持为段落，由下游按题号切小题）
+        若块以 # 开头且含多行，则首行单独成 hN，其余行成 paragraph，避免大题与第一题被合并。
+        """
+        blocks = re.split(r"\n\s*\n", markdown_content)
+        out: List[StructureBlock] = []
+        # 标题行正则：行首的 # 数量 + 正文
+        heading_re = re.compile(r"^(#+)\s*(.*)$", re.MULTILINE)
+        # 无序列表：行首可选空白后 - 或 *
+        unordered_list_re = re.compile(r"^\s*[-*]\s+", re.MULTILINE)
+
+        for block in blocks:
+            block = block.strip()
+            if not block:
+                continue
+            lines = block.split("\n")
+            first_line = lines[0].strip()
+            heading_m = heading_re.match(first_line) if first_line else None
+
+            if heading_m:
+                level = min(len(heading_m.group(1)), 6)
+                h_type = f"h{level}"
+                title_text = heading_m.group(2).strip()
+                if len(lines) > 1:
+                    out.append((title_text, h_type))
+                    rest = "\n".join(lines[1:]).strip()
+                    if rest:
+                        out.append((rest, "paragraph"))
+                else:
+                    out.append((title_text, h_type))
+                continue
+
+            # 整块首行是否为无序列表项（注意事项等）
+            if unordered_list_re.match(first_line):
+                out.append((block, "unordered_list"))
+                continue
+
+            out.append((block, "paragraph"))
+
+        return out
+
     def _markdown_to_paragraphs_and_hints(self, markdown_content: str) -> Tuple[List[str], List[bool]]:
-        """将 Markdown 按双换行拆成段落，并标记每段是否像大题/标题（用于流式解析）。"""
+        """将 Markdown 按双换行拆成段落，并标记每段是否像大题/标题（用于流式解析）。
+        若块以 # 开头且含多行，则首行单独成段（大题/标题），其余行成一段（题目内容），避免大题与第一题被合并。
+        （供 document_parser 等非 Markdown 路径或兼容测试使用；主路径使用 _markdown_to_structure_blocks + parse_structure_from_blocks。）
+        """
         blocks = re.split(r"\n\s*\n", markdown_content)
         paragraphs = []
         heading_hints = []
@@ -66,27 +116,34 @@ class MarkdownParser:
             block = block.strip()
             if not block:
                 continue
-            first_line = block.split("\n")[0].strip()
+            lines = block.split("\n")
+            first_line = lines[0].strip()
             first_line_stripped = first_line
             while first_line_stripped.startswith("#"):
                 first_line_stripped = first_line_stripped.lstrip("#").strip()
-            para_text = block
-            if block.startswith("#"):
-                lines = block.split("\n")
-                new_lines = []
-                for line in lines:
-                    s = line.strip()
-                    while s.startswith("#"):
-                        s = s.lstrip("#").strip()
-                    new_lines.append(s)
-                para_text = "\n".join(new_lines).strip()
-            paragraphs.append(para_text)
+            is_heading_block = block.startswith("#")
             hint = (
-                block.startswith("#")
+                is_heading_block
                 or SECTION_HEADER_PATTERN.match(first_line_stripped)
                 or is_relaxed_section_heading(first_line_stripped)
             )
-            heading_hints.append(hint)
+            if is_heading_block and len(lines) > 1:
+                title_para = first_line_stripped
+                paragraphs.append(title_para)
+                heading_hints.append(True)
+                rest = "\n".join(lines[1:]).strip()
+                if rest:
+                    paragraphs.append(rest)
+                    heading_hints.append(False)
+            else:
+                if is_heading_block:
+                    para_text = "\n".join(
+                        re.sub(r"^#+\s*", "", line.strip()).strip() for line in lines
+                    ).strip()
+                else:
+                    para_text = block
+                paragraphs.append(para_text)
+                heading_hints.append(hint)
         return paragraphs, heading_hints
 
     def parse_markdown_to_questions(self, markdown_content: str) -> List[QuestionResult]:

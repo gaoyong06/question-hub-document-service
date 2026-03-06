@@ -7,9 +7,14 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import List, Optional, Tuple, Callable
+from typing import Callable, List, Optional, Tuple
 
 from app.models import QuestionResult
+
+# Markdown 结构块类型：用于流式解析时传递格式信息。(text, block_type)
+# block_type: "h1" 试卷标题, "h2"/"h3" 大题层级, "paragraph" 普通段落, "unordered_list" 无序列表
+StructureBlockType = str  # "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "paragraph" | "unordered_list"
+StructureBlock = Tuple[str, StructureBlockType]
 
 # 试题类型：与 question-hub-service 表 question.type 及前端约定一致
 QUESTION_TYPES = ("single-choice", "multiple-choice", "fill-blank", "judge", "essay")
@@ -126,8 +131,10 @@ def section_title_to_question_type(section_title: str) -> str:
         return QUESTION_TYPES[1]
     if "判断题" in section_title:
         return QUESTION_TYPES[3]
-    if "解答题" in section_title:
+    if "解答题" in section_title or "作图题" in section_title:
         return QUESTION_TYPES[4]
+    if "计算题" in section_title:
+        return QUESTION_TYPES[2]
     return QUESTION_TYPES[2]
 
 
@@ -194,6 +201,135 @@ class ParsedStructure:
     answer_block_texts: List[str] = field(default_factory=list)
 
 
+def parse_structure_from_blocks(blocks: List[StructureBlock]) -> ParsedStructure:
+    """
+    基于 Markdown 结构块流式解析试卷结构。
+    利用块类型（#/##/列表等）明确区分：试卷标题(h1)、大题(h2/h3)、普通段落、列表。
+    """
+    order_map = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9, "十": 10}
+    next_order = 11
+    implicit_section_order = 1
+    structure = ParsedStructure()
+    current_section: Optional[Tuple[int, str]] = None
+    current_question_lines: List[str] = []
+    title_done = False
+    in_notes = False
+    notes_lines: List[str] = []
+    in_answer_block = False
+    answer_block_lines: List[str] = []
+
+    def flush_section() -> None:
+        nonlocal current_section, current_question_lines
+        if not current_section:
+            return
+        block = "\n".join(current_question_lines).strip()
+        section_questions = split_section_content_into_questions(block) if block else []
+        structure.sections.append((current_section[0], current_section[1], section_questions))
+        current_section = None
+        current_question_lines = []
+
+    def flush_answer_block() -> None:
+        nonlocal in_answer_block, answer_block_lines
+        if answer_block_lines:
+            structure.answer_block_texts.append("\n".join(answer_block_lines))
+        answer_block_lines = []
+        in_answer_block = False
+
+    for text, block_type in blocks:
+        p = (text or "").strip()
+        if not p:
+            if in_answer_block:
+                answer_block_lines.append("")
+            elif current_section and current_question_lines:
+                current_question_lines.append("")
+            elif in_notes:
+                notes_lines.append("")
+            continue
+
+        # 1. 参考答案区块（按内容识别，与格式无关）
+        if any(h in p for h in REFERENCE_ANSWER_HEADERS) and (
+            p.startswith("参考答案") or p.startswith("标准答案") or (p.startswith("答案") and len(p) <= 10)
+        ):
+            flush_section()
+            if in_answer_block:
+                flush_answer_block()
+            in_answer_block = True
+            answer_block_lines = [p] if p else []
+            continue
+
+        if in_answer_block:
+            answer_block_lines.append(p)
+            continue
+
+        # 2. 注意事项
+        if p.startswith("注意事项"):
+            in_notes = True
+            start = len("注意事项")
+            if start < len(p) and p[start] in "：:":
+                start += 1
+            rest = p[start:].strip()
+            if rest:
+                notes_lines.append(rest)
+            continue
+        if in_notes:
+            # 格式明确为大题标题（h2/h3 等）时结束注意事项
+            if block_type in ("h2", "h3", "h4", "h5", "h6") or SECTION_HEADER_PATTERN.match(p) or is_relaxed_section_heading(p):
+                in_notes = False
+                structure.document_description = to_markdown_line_breaks("\n".join(notes_lines).strip())
+                notes_lines = []
+            else:
+                notes_lines.append(p)
+                continue
+
+        # 3. 根据 Markdown 层级：h1 作试卷标题，h2/h3 作大题
+        if block_type == "h1":
+            if not title_done and not structure.document_title:
+                structure.document_title = p[:200].strip()
+                title_done = True
+            continue
+        if block_type in ("h2", "h3", "h4", "h5", "h6"):
+            flush_section()
+            section_match = SECTION_HEADER_PATTERN.match(p)
+            if section_match:
+                cn_num, rest = section_match.group(1), section_match.group(2).strip()
+                order = order_map.get(cn_num)
+                if order is None:
+                    order = next_order
+                    next_order += 1
+                title = (cn_num + "." + rest) if not rest.startswith(".") else (cn_num + rest)
+                current_section = (order, title)
+            else:
+                current_section = (implicit_section_order, p)
+                implicit_section_order += 1
+            current_question_lines = []
+            continue
+
+        # 4. 无大题时题号行仅作试卷标题候选
+        if QUESTION_START_PATTERN.match(p) and not current_section:
+            if not title_done and not structure.document_title:
+                structure.document_title = p[:200].strip()
+                title_done = True
+            continue
+
+        # 5. 普通段落/列表：归属当前大题或标题或注意事项
+        if current_section:
+            current_question_lines.append(p)
+        elif not title_done and not in_notes:
+            if not structure.document_title:
+                structure.document_title = p[:200].strip()
+            title_done = True
+        elif in_notes:
+            notes_lines.append(p)
+
+    if in_notes and notes_lines:
+        structure.document_description = to_markdown_line_breaks("\n".join(notes_lines).strip())
+    flush_section()
+    if in_answer_block:
+        flush_answer_block()
+
+    return structure
+
+
 def parse_structure(
     paragraphs: List[str],
     format_suggests_heading: Callable[[int], bool],
@@ -249,21 +385,15 @@ def parse_structure(
             flush_section()
             if in_answer_block:
                 flush_answer_block()
-            first_rest = ""
-            for h in ("参考答案", "标准答案", "答案"):
-                if p.startswith(h):
-                    first_rest = p[len(h):].lstrip("：: \t")
-                    break
             in_answer_block = True
-            answer_block_lines = [first_rest] if first_rest else []
+            # 首行保留“参考答案”等，便于 parse_reference_answers 定位
+            answer_block_lines = [p] if p else []
             continue
 
         if in_answer_block:
-            if SECTION_HEADER_PATTERN.match(p) or is_relaxed_section_heading(p) or format_suggests_heading(i):
-                flush_answer_block()
-            else:
-                answer_block_lines.append(p)
-                continue
+            # 参考答案区块内常有“一.选择题”“二.判断题”等小节标题，一律当作答案内容收集，不结束区块
+            answer_block_lines.append(p)
+            continue
 
         # 2. 注意事项
         if p.startswith("注意事项"):
