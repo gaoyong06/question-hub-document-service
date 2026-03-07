@@ -239,10 +239,15 @@ def content_has_choice_options(content: str) -> bool:
 
 
 def parse_stem_and_options_from_choice_content(content: str) -> Tuple[str, List[str]]:
-    """从「题干 + A. B. C. D.」形式拆出题干与选项列表。"""
+    """
+    从「题干 + A. B. C. D.」形式拆出题干与选项列表。
+    支持选项同行（A\. x  B\. y）或换行（A\. x\\nB\. y）。
+    按每个 A/B/C/D 选项标记拆分，不限于行首，以正确解析「A\. ![]  B\. ![]」等同行情形。
+    """
     if not content:
         return "", []
-    parts = re.split(r"(?:\n|^)\s*[A-D]\\?[\.．、]\s*", content, maxsplit=0)
+    # 按每个 A. B. C. D. 拆分（支持 A\. 转义形式），不限于行首
+    parts = re.split(r"[A-D]\\?[\.．、]\s*", content)
     stem = (parts[0].strip() if parts else "").strip()
     options = [p.strip() for p in parts[1:] if p.strip()]
     return stem, options
@@ -559,7 +564,8 @@ def structure_to_questions(
             content = content.strip()
             options: Optional[List[str]] = None
             stem = content
-            if q_type in (QUESTION_TYPES[0], QUESTION_TYPES[1]) and content_has_choice_options(content):
+            # 选择题：始终尝试解析 options，不依赖 content_has_choice_options，以覆盖「A. x  B. y」同行等边界格式
+            if q_type in (QUESTION_TYPES[0], QUESTION_TYPES[1]):
                 stem, opts = parse_stem_and_options_from_choice_content(content)
                 if len(opts) >= 2:
                     options = opts
