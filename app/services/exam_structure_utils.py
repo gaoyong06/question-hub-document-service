@@ -36,9 +36,10 @@ SECTION_RELAXED_PATTERN = re.compile(
 )
 SECTION_TITLE_MAX_LEN = 80
 
+# 注意：不要使用 A/B/C/D 作为拆分点，否则选择题的选项会被错误拆成独立小题。
+# A. B. C. D. 是选项标记，应保留在题干+选项的完整内容中，由 parse_stem_and_options_from_choice_content 提取。
 QUESTION_SPLIT_PATTERNS = [
     re.compile(r"(?:^|\n)\s*(?=\d+\\?[\.．、]\s)", re.MULTILINE),
-    re.compile(r"(?:^|\n)\s*(?=[a-dA-D]\\?[\.．、]\s)", re.MULTILINE),
     re.compile(r"(?:^|\n)\s*(?=[①②③④⑤⑥⑦⑧⑨⑩])", re.MULTILINE),
     re.compile(r"(?:^|\n)\s*(?=\(\d+\)\s)", re.MULTILINE),
 ]
@@ -89,10 +90,19 @@ def parse_reference_answers(full_text: str) -> List[str]:
             block = block[first_nl + 1:]
     else:
         block = re.sub(r"^[\s\S]*?" + re.escape(header), "", block, count=1).strip()
+    # 参考答案区块中可能含「一.选择题」「二.判断题」或「## 二.判断题」等大题标题，需从答案中剔除
+    section_header_or_next = re.compile(
+        r"\n\s*(?:#+\s*)?[一二三四五六七八九十]+[\.．、]\s*(?:选择题|单选题|多选题|填空题|判断题|解答题|计算题|作图题).*$",
+        re.MULTILINE,
+    )
     pattern = re.compile(r"\d+\\?[\.．、]\s*")
     parts = pattern.split(block)
     for seg in parts:
         ans = re.sub(r"^[\s\u3000]+|[\s\u3000]+$", "", seg)
+        if not ans:
+            continue
+        # 若答案后紧跟下一大题标题（如 "C  \n二.判断题"），只保留答案部分
+        ans = section_header_or_next.sub("", ans).strip()
         if not ans:
             continue
         if SECTION_HEADER_PATTERN.match(ans) or re.match(r"^[一二三四五六七八九十]+[\.．、]\s*[选判填计作解].*$", ans):
@@ -101,11 +111,76 @@ def parse_reference_answers(full_text: str) -> List[str]:
     return out
 
 
+def _find_question_number_splits(block: str) -> Optional[List[int]]:
+    """
+    基于序号解析主小题拆分点。
+    - 嵌套结构(1,1,2,3,2)：序号回退时拆分，即 N < 已出现最大序号
+    - 扁平结构(1,2)：无重复时，遇到下一主小题号时拆分
+    Returns:
+        None: 题号不足 2 个，无法应用本逻辑
+        []: 题号足够但无需拆分（单题含子项，如 1,1,2,3）
+        [pos,...]: 拆分点位置列表
+    """
+    # 匹配行首的题号：支持 1. 1\. 1． 1、
+    pattern = re.compile(r"(?:^|\n)\s*(\d+)\\?[\.．、]\s*", re.MULTILINE)
+    matches = list(pattern.finditer(block))
+    if len(matches) < 2:
+        return None
+
+    split_positions: List[int] = []
+    max_seen = 0
+    seen_numbers: set[int] = set()
+    has_duplicate = False
+
+    for i, m in enumerate(matches):
+        n = int(m.group(1))
+        if i == 0:
+            max_seen = n
+            seen_numbers.add(n)
+            continue
+
+        should_split = False
+        if n < max_seen:
+            should_split = True  # 序号回退，新主小题
+        elif n == max_seen + 1 and not has_duplicate:
+            should_split = True  # 扁平结构，下一主小题
+
+        if n in seen_numbers:
+            has_duplicate = True
+        seen_numbers.add(n)
+        max_seen = max(max_seen, n)
+
+        if should_split:
+            split_positions.append(m.start())
+
+    return split_positions
+
+
 def split_section_content_into_questions(block: str) -> List[str]:
-    """将一大题下的整块文本拆成多道小题。"""
+    """将一大题下的整块文本拆成多道小题。优先使用序号感知拆分，否则回退到原有逻辑。"""
     block = (block or "").strip()
     if not block:
         return []
+
+    result = _find_question_number_splits(block)
+    if result is not None:
+        # 题号足够：result=[] 表示单题含子项，result=[pos,...] 表示有拆分点
+        if not result:
+            return [block]  # 无需拆分，整块为一题
+        parts = []
+        start = 0
+        for pos in result:
+            part = block[start:pos].strip()
+            if part:
+                parts.append(part)
+            start = pos
+        part = block[start:].strip()
+        if part:
+            parts.append(part)
+        if len(parts) >= 2:
+            return parts
+
+    # 回退：题号不足 2 个，或 ①②③、(1) 等格式
     for pattern in QUESTION_SPLIT_PATTERNS:
         parts = pattern.split(block)
         parts = [p.strip() for p in parts if p.strip()]
@@ -143,6 +218,16 @@ def to_markdown_line_breaks(text: str) -> str:
     if not text or "\n" not in text:
         return text or ""
     return re.sub(r"(?<!\n)(?<!  )\n(?!\n)", "  \n", text)
+
+
+def protect_fill_blank_underscores(text: str) -> str:
+    """
+    保护填空题中的下划线填空线（如 _______），避免被 Markdown 解析为斜体而丢失。
+    将 3 个及以上连续下划线转义为 \\_，确保渲染时正确显示。
+    """
+    if not text or "_" not in text:
+        return text or ""
+    return re.sub(r"_{3,}", lambda m: "\\_" * len(m.group()), text)
 
 
 def content_has_choice_options(content: str) -> bool:
@@ -501,11 +586,11 @@ def structure_to_questions(
 
     for q in questions:
         if q.content:
-            q.content = to_markdown_line_breaks(q.content)
+            q.content = protect_fill_blank_underscores(to_markdown_line_breaks(q.content))
         if q.answer:
-            q.answer = to_markdown_line_breaks(q.answer)
+            q.answer = protect_fill_blank_underscores(to_markdown_line_breaks(q.answer))
         if q.options:
-            q.options = [to_markdown_line_breaks(o) for o in q.options]
+            q.options = [protect_fill_blank_underscores(to_markdown_line_breaks(o)) for o in q.options]
 
     for q in questions:
         if q.type not in QUESTION_TYPES:
