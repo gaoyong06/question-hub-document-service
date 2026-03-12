@@ -57,6 +57,35 @@ OPTION_MARKER_NORMALIZE = re.compile(r"([A-Da-d])[\.．、]\s*")
 # 缩进转无序列表：约每 18pt 一级，对应 Markdown 每级 2 空格
 INDENT_PT_PER_LEVEL = 18.0
 
+# 文件签名：DOCX 为 ZIP (PK)；旧版 Word .doc 为 OLE 复合文档 (D0 CF)
+ZIP_DOCX_SIGNATURE = b"PK"
+OLE_DOC_SIGNATURE = b"\xd0\xcf"
+
+
+def _is_valid_word_signature(first_bytes: bytes) -> bool:
+    """是否为支持的 Word 格式：.docx (ZIP) 或 .doc (OLE)。"""
+    return first_bytes == ZIP_DOCX_SIGNATURE or first_bytes == OLE_DOC_SIGNATURE
+
+
+def _ensure_doc_path_for_ole(local_path: str) -> str:
+    """
+    若文件内容为 .doc (OLE)，且当前路径为 .docx，则重命名为 .doc，便于后续 convert_doc_to_docx 识别。
+    返回最终使用的路径。
+    """
+    if not os.path.isfile(local_path):
+        return local_path
+    with open(local_path, "rb") as f:
+        sig = f.read(2)
+    if sig != OLE_DOC_SIGNATURE:
+        return local_path
+    path_lower = local_path.lower()
+    if not path_lower.endswith(".docx"):
+        return local_path
+    doc_path = os.path.splitext(local_path)[0] + ".doc"
+    os.rename(local_path, doc_path)
+    logger.info("Renamed OLE file to .doc for conversion: %s -> %s", local_path, doc_path)
+    return doc_path
+
 
 def _normalize_markdown_list_markers(text: str) -> str:
     """将题号/选项序号统一为「数字\\. / A\\. 」形式：转义点号避免 Markdown 有序列表语法，渲染时显示为 1. 2. 3. 而非全是 1.；exam_structure_utils 已支持 \\. 可选匹配。"""
@@ -196,11 +225,14 @@ class DocumentParser:
                     if len(file_bytes) > settings.max_file_size:
                         raise ValueError(f"File size {len(file_bytes)} exceeds maximum {settings.max_file_size}")
                     
-                    # 验证文件签名（docx 是 ZIP 格式，以 PK 开头）
-                    if len(file_bytes) < 2 or file_bytes[:2] != b'PK':
-                        logger.warning(f"File does not have valid ZIP/DOCX signature, first 50 bytes: {file_bytes[:50]}")
-                    else:
-                        logger.info(f"File has valid ZIP/DOCX signature (PK)")
+                    # 验证文件签名：支持 .docx (ZIP/PK) 与 .doc (OLE/D0 CF)
+                    if len(file_bytes) < 2 or not _is_valid_word_signature(file_bytes[:2]):
+                        raise ValueError(
+                            f"File is not a supported Word format (expected DOCX or DOC; signature: {file_bytes[:2]!r})"
+                        )
+                    logger.info(
+                        f"File has valid Word signature: {'ZIP/DOCX' if file_bytes[:2] == ZIP_DOCX_SIGNATURE else 'OLE/DOC'}"
+                    )
                     
                     # 保存文件
                     with open(local_path, "wb") as f:
@@ -213,11 +245,8 @@ class DocumentParser:
                     saved_size = os.path.getsize(local_path)
                     logger.info(f"File saved to {local_path}, size: {saved_size} bytes")
                     
-                    # 再次验证文件签名
-                    with open(local_path, 'rb') as f:
-                        first_bytes = f.read(2)
-                        if first_bytes != b'PK':
-                            raise ValueError(f"Saved file is not a valid ZIP/DOCX file (signature: {first_bytes})")
+                    # OLE (.doc) 时保存为 .doc 扩展名，便于后续 convert_doc_to_docx
+                    local_path = Path(_ensure_doc_path_for_ole(str(local_path)))
                 else:
                     # 直接是文件流
                     # 检查文件大小
@@ -237,11 +266,14 @@ class DocumentParser:
                     saved_size = os.path.getsize(local_path)
                     logger.info(f"File saved to {local_path}, size: {saved_size} bytes")
                     
-                    # 验证文件签名（确保是有效的 ZIP/DOCX 文件）
-                    with open(local_path, 'rb') as f:
+                    # 验证文件签名并统一 .doc 路径（OLE 时改为 .doc 供 convert_doc_to_docx）
+                    with open(local_path, "rb") as f:
                         first_bytes = f.read(2)
-                        if first_bytes != b'PK':
-                            raise ValueError(f"Saved file is not a valid ZIP/DOCX file (signature: {first_bytes})")
+                    if not _is_valid_word_signature(first_bytes):
+                        raise ValueError(
+                            f"Saved file is not a supported Word format (signature: {first_bytes!r})"
+                        )
+                    local_path = Path(_ensure_doc_path_for_ole(str(local_path)))
         
         elif scheme == 'file':
             # file:// 协议: 直接访问本地文件
@@ -266,6 +298,8 @@ class DocumentParser:
             import shutil
             shutil.copy2(file_path, local_path)
             logger.info(f"Copied file from {file_path} to {local_path}")
+            # 若为 .doc (OLE)，统一为 .doc 扩展名
+            local_path = Path(_ensure_doc_path_for_ole(str(local_path)))
         
         else:
             # 无协议或未知协议: 作为本地文件路径处理
@@ -304,6 +338,7 @@ class DocumentParser:
             import shutil
             shutil.copy2(file_path, local_path)
             logger.info(f"Copied file from {file_path} to {local_path}")
+            local_path = Path(_ensure_doc_path_for_ole(str(local_path)))
         
         # 最终验证：确保文件存在且有效
         if not os.path.exists(local_path):
@@ -313,14 +348,18 @@ class DocumentParser:
         if file_size == 0:
             raise ValueError(f"Downloaded file is empty: {local_path}")
         
-        # 验证文件签名
-        with open(local_path, 'rb') as f:
+        # 验证文件签名（支持 DOCX 与 DOC），并统一 .doc 路径
+        with open(local_path, "rb") as f:
             first_bytes = f.read(2)
-            if first_bytes != b'PK':
-                raise ValueError(f"Downloaded file is not a valid ZIP/DOCX file (signature: {first_bytes}, size: {file_size})")
-        
-        logger.info(f"File downloaded successfully: {local_path}, size: {file_size} bytes, signature: PK")
-        return str(local_path)
+        if not _is_valid_word_signature(first_bytes):
+            raise ValueError(
+                f"Downloaded file is not a supported Word format (signature: {first_bytes!r}, size: {file_size})"
+            )
+        local_path = _ensure_doc_path_for_ole(str(local_path))
+        logger.info(
+            f"File downloaded successfully: {local_path}, size: {os.path.getsize(local_path)} bytes"
+        )
+        return local_path
 
     def convert_doc_to_docx(self, doc_path: str) -> Optional[str]:
         """
