@@ -295,7 +295,8 @@ class DocumentParser:
         logger.info(
             f"File downloaded successfully: {local_path}, size: {os.path.getsize(local_path)} bytes"
         )
-        return local_path
+        # 与类型注解 -> str 一致：local_path 由 self.temp_dir / (...) 得到，为 Path，转为 str 返回
+        return str(local_path)
 
     def convert_doc_to_docx(self, doc_path: str) -> Optional[str]:
         """

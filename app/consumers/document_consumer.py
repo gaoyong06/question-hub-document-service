@@ -214,17 +214,20 @@ class DocumentConsumer:
         paths_to_cleanup = []
         try:
             # 下载文件（传入原始文件名则按扩展名落盘，doc/docx→Word 解析，其余→MarkItDown）
+            # 调用链：DocumentParser.download_file -> 返回本地文件路径（已约定返回 str，见 document_parser.py）
             file_path = self.parser.download_file(message.file_url, message.file_name)
             paths_to_cleanup.append(file_path)
+            file_path = os.fspath(file_path)  # 防御性转为 str，供 .lower()/os.path 等使用
             file_ext = os.path.splitext(file_path)[1].lower()
 
             # 1. 得到 markdown_content：Word(.doc/.docx) 用 python-docx，其他用 MarkItDown
             if file_ext in (".doc", ".docx"):
                 if file_ext == ".doc":
+                    # convert_doc_to_docx 返回 Optional[str]，为 .docx 路径
                     docx_path = self.parser.convert_doc_to_docx(file_path)
                     if docx_path:
                         paths_to_cleanup.append(docx_path)
-                        file_path = docx_path
+                        file_path = os.fspath(docx_path)
                 if file_path.lower().endswith(".docx"):
                     markdown_content, metadata = self.parser.docx_to_markdown(file_path)
                 else:
