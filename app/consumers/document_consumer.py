@@ -213,8 +213,8 @@ class DocumentConsumer:
         metadata = {}
         paths_to_cleanup = []
         try:
-            # 下载文件
-            file_path = self.parser.download_file(message.file_url)
+            # 下载文件（传入原始文件名则按扩展名落盘，doc/docx→Word 解析，其余→MarkItDown）
+            file_path = self.parser.download_file(message.file_url, message.file_name)
             paths_to_cleanup.append(file_path)
             file_ext = os.path.splitext(file_path)[1].lower()
 

@@ -7,12 +7,13 @@ from pydantic import BaseModel, Field
 
 
 class DocumentConvertMessage(BaseModel):
-    """文档转换消息（从RabbitMQ接收）"""
+    """文档转换消息（从 MQ 接收）；file_name 由 question-hub 上传时传入，用于按扩展名落盘与分流"""
     task_id: str = Field(..., alias="task_id")
     merchant_id: str = Field(..., alias="merchant_id")
     file_id: str = Field(..., alias="file_id")
     file_url: str = Field(..., alias="file_url")
-    
+    file_name: Optional[str] = Field(default=None, alias="file_name")  # 上传时的原始文件名，用于确定扩展名（兼容旧消息无此字段）
+
     class Config:
         populate_by_name = True
 
